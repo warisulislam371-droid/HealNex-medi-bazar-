@@ -1,0 +1,457 @@
+import React, { useState, useEffect } from 'react';
+import { User, Notification, Category } from '../types';
+import { dbLocal } from '../db';
+import { INITIAL_CATEGORIES } from '../data';
+import {
+  Activity,
+  Search,
+  Mic,
+  MicOff,
+  ShoppingCart,
+  Heart,
+  Bell,
+  User as UserIcon,
+  ChevronDown,
+  LogOut,
+  LifeBuoy,
+  BookOpen,
+  SlidersHorizontal,
+  ChevronRight,
+  Sparkles,
+  Store,
+  CheckCircle,
+  HelpCircle,
+  Clock
+} from 'lucide-react';
+
+interface NavbarProps {
+  currentUser: User | null;
+  onLogout: () => void;
+  onNavigate: (view: string) => void;
+  currentView: string;
+  cartCount: number;
+  wishlistCount: number;
+  compareCount: number;
+  onSearch: (query: string) => void;
+  onCategorySelect: (catName: string) => void;
+}
+
+export default function Navbar({
+  currentUser,
+  onLogout,
+  onNavigate,
+  currentView,
+  cartCount,
+  wishlistCount,
+  compareCount,
+  onSearch,
+  onCategorySelect
+}: NavbarProps) {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isVoiceListening, setIsVoiceListening] = useState(false);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [showUserDropdown, setShowUserDropdown] = useState(false);
+  const [showCatMenu, setShowCatMenu] = useState(false);
+
+  useEffect(() => {
+    // Refresh notifications periodically or on mount
+    setNotifications(dbLocal.getNotifications());
+    const interval = setInterval(() => {
+      setNotifications(dbLocal.getNotifications());
+    }, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const displayedNotifications = notifications.filter(n => {
+    if (!currentUser) return false;
+    if (currentUser.role === 'admin') {
+      return true;
+    }
+    return n.userId === currentUser.id || n.userId === 'all';
+  });
+
+  const unreadCount = displayedNotifications.filter(n => !n.read).length;
+
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onSearch(searchQuery);
+    onNavigate('marketplace');
+  };
+
+  const triggerVoiceSearch = () => {
+    if (isVoiceListening) {
+      setIsVoiceListening(false);
+      return;
+    }
+    setIsVoiceListening(true);
+    // Simulate speech detection
+    setTimeout(() => {
+      const voiceSamples = ['ECG Machine', 'Ventilator', 'ICU Beds', 'Nitrile Gloves', 'Centrifuge'];
+      const randomQuery = voiceSamples[Math.floor(Math.random() * voiceSamples.length)];
+      setSearchQuery(randomQuery);
+      onSearch(randomQuery);
+      setIsVoiceListening(false);
+      onNavigate('marketplace');
+    }, 2500);
+  };
+
+  const handleNotificationClick = (id: string) => {
+    const updated = notifications.map(n => n.id === id ? { ...n, read: true } : n);
+    dbLocal.saveNotifications(updated);
+    setNotifications(updated);
+  };
+
+  const markAllNotifsRead = () => {
+    const displayedIds = displayedNotifications.map(n => n.id);
+    const updated = notifications.map(n => displayedIds.includes(n.id) ? { ...n, read: true } : n);
+    dbLocal.saveNotifications(updated);
+    setNotifications(updated);
+  };
+
+  return (
+    <header className="sticky top-0 z-40 bg-white text-slate-800 border-b border-slate-200 shadow-sm font-sans">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex items-center justify-between h-16 gap-4">
+          
+          {/* Logo Brand (Only visible on mobile/tablet since desktop has sidebar) */}
+          <div 
+            onClick={() => { onNavigate('marketplace'); onSearch(''); setSearchQuery(''); }}
+            className="flex items-center gap-2 cursor-pointer shrink-0 transition-transform hover:scale-[1.01] md:hidden"
+          >
+            <div className="relative bg-[#0F766E] text-white p-1.5 rounded-lg shadow-sm">
+              <Activity className="w-4 h-4 text-white stroke-[2.5]" />
+            </div>
+            <div>
+              <span className="font-display font-black text-sm tracking-tight block leading-tight text-slate-900">
+                Heal<span className="text-teal-600">Nex</span>
+              </span>
+              <span className="text-[8px] text-slate-400 font-medium tracking-widest uppercase block -mt-1 font-display">
+                Medi Bazar
+              </span>
+            </div>
+          </div>
+
+          {/* Categories Button */}
+          <div className="relative shrink-0 hidden md:block">
+            <button
+              onClick={() => setShowCatMenu(!showCatMenu)}
+              className="flex items-center gap-1.5 bg-slate-50 hover:bg-slate-100 text-slate-700 px-3.5 py-2 rounded-xl border border-slate-200 text-xs font-semibold tracking-wide transition"
+            >
+              <SlidersHorizontal className="w-4 h-4 text-slate-400" />
+              Categories
+              <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${showCatMenu ? 'rotate-180' : ''}`} />
+            </button>
+
+            {showCatMenu && (
+              <div className="absolute top-full left-0 mt-2 w-72 bg-white rounded-2xl shadow-2xl border border-slate-100 py-2.5 text-slate-800 z-50">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-4 pb-2 border-b border-slate-50 mb-1.5">
+                  Clinical Specialities
+                </p>
+                {INITIAL_CATEGORIES.map((cat) => (
+                  <button
+                    key={cat.id}
+                    onClick={() => {
+                      onCategorySelect(cat.name);
+                      setShowCatMenu(false);
+                      onNavigate('marketplace');
+                    }}
+                    className="w-full text-left px-4 py-2 text-xs font-medium hover:bg-teal-50 hover:text-teal-800 flex items-center justify-between group transition"
+                  >
+                    <span>{cat.name}</span>
+                    <ChevronRight className="w-3.5 h-3.5 text-slate-300 group-hover:text-teal-600 transition-transform group-hover:translate-x-1" />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Search Box Form */}
+          <form onSubmit={handleSearchSubmit} className="flex-1 max-w-md relative">
+            <div className="relative flex items-center bg-slate-50 text-slate-800 rounded-xl overflow-hidden group border border-slate-200 focus-within:border-teal-600 transition-colors">
+              <Search className="w-4 h-4 text-slate-400 ml-3.5 shrink-0" />
+              <input
+                type="text"
+                placeholder="Search clinical monitors, syringe pumps, ventilators..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full pl-2.5 pr-20 py-2 text-xs text-slate-800 outline-none placeholder-slate-400 bg-slate-50 font-sans"
+              />
+              <div className="absolute right-1.5 flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={triggerVoiceSearch}
+                  className={`p-1 rounded-lg transition shrink-0 ${
+                    isVoiceListening 
+                      ? 'bg-rose-500 text-white animate-pulse' 
+                      : 'text-slate-400 hover:text-teal-700 hover:bg-slate-100'
+                  }`}
+                  title="Voice Search Simulator"
+                >
+                  {isVoiceListening ? <Mic className="w-3.5 h-3.5 text-white" /> : <MicOff className="w-3.5 h-3.5" />}
+                </button>
+                <button
+                  type="submit"
+                  className="bg-teal-700 hover:bg-teal-800 text-white px-2.5 py-1 rounded-lg text-[10px] font-bold transition shrink-0"
+                >
+                  Go
+                </button>
+              </div>
+            </div>
+
+            {/* Listening Banner Overlay */}
+            {isVoiceListening && (
+              <div className="absolute top-full left-0 right-0 mt-2 bg-rose-600 text-white rounded-xl shadow-xl px-4 py-2 text-xs flex items-center justify-between z-50 animate-bounce">
+                <span className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 bg-white rounded-full animate-ping"></span>
+                  Listening for clinical term... Try saying "ECG Machine"
+                </span>
+                <span className="text-[10px] opacity-75 font-mono">SIMULATED</span>
+              </div>
+            )}
+          </form>
+
+          {/* Toolbar Utilities */}
+          <div className="flex items-center gap-1 sm:gap-3 shrink-0">
+            
+            {/* Live Node Statistics */}
+            <div className="hidden lg:flex gap-4 border-r border-slate-200 pr-4">
+              <div className="text-right leading-none">
+                <p className="text-[9px] text-slate-400 font-bold uppercase mb-1">Platform Status</p>
+                <div className="flex items-center gap-1.5 justify-end">
+                  <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                  <span className="text-xs font-semibold text-slate-800">LIVE</span>
+                </div>
+              </div>
+              <div className="text-right leading-none">
+                <p className="text-[9px] text-slate-400 font-bold uppercase mb-1">Active Nodes</p>
+                <span className="text-xs font-bold text-teal-700">128 / 150</span>
+              </div>
+            </div>
+
+            {/* Compare Badge */}
+            <button
+              onClick={() => onNavigate('marketplace')}
+              className="p-2 relative hover:bg-slate-100 rounded-xl text-slate-500 hover:text-teal-700 transition group"
+              title="Product Comparison"
+            >
+              <SlidersHorizontal className="w-5 h-5" />
+              {compareCount > 0 && (
+                <span className="absolute top-0 right-0 bg-orange-500 text-white font-mono text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center border border-white">
+                  {compareCount}
+                </span>
+              )}
+            </button>
+
+            {/* Blogs Trigger */}
+            <button
+              onClick={() => onNavigate('blogs')}
+              className={`p-2 rounded-xl transition flex items-center gap-1 text-xs font-semibold ${
+                currentView === 'blogs' ? 'bg-teal-50 text-teal-700' : 'text-slate-500 hover:bg-slate-100 hover:text-teal-700'
+              }`}
+              title="Knowledge Center / Clinical Blogs"
+            >
+              <BookOpen className="w-5 h-5" />
+              <span className="hidden lg:inline">Blogs</span>
+            </button>
+
+            {/* Support Tickets Trigger */}
+            <button
+              onClick={() => onNavigate('tickets')}
+              className={`p-2 rounded-xl transition flex items-center gap-1 text-xs font-semibold ${
+                currentView === 'tickets' ? 'bg-teal-50 text-teal-700' : 'text-slate-500 hover:bg-slate-100 hover:text-teal-700'
+              }`}
+              title="Support Tickets"
+            >
+              <LifeBuoy className="w-5 h-5" />
+              <span className="hidden lg:inline">Tickets</span>
+            </button>
+
+            {/* RFQs Page Trigger */}
+            <button
+              onClick={() => onNavigate('rfqs')}
+              className={`p-2 rounded-xl transition flex items-center gap-1 text-xs font-semibold ${
+                currentView === 'rfqs' ? 'bg-teal-50 text-teal-700' : 'text-slate-500 hover:bg-slate-100 hover:text-teal-700'
+              }`}
+              title="B2B RFQ Bidding Platform"
+            >
+              <Sparkles className="w-5 h-5 text-teal-600 shrink-0" />
+              <span className="hidden lg:inline">RFQs</span>
+            </button>
+
+            {/* Cart Button */}
+            <button
+              onClick={() => onNavigate('cart')}
+              className={`p-2 rounded-xl relative transition ${
+                currentView === 'cart' ? 'bg-teal-50 text-teal-700 font-bold' : 'text-slate-500 hover:bg-slate-100 hover:text-teal-700'
+              }`}
+              title="Multi-Vendor Shopping Cart"
+            >
+              <ShoppingCart className="w-5 h-5" />
+              {cartCount > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 bg-orange-500 text-white font-mono text-[9px] font-bold min-w-5 h-5 px-1 rounded-full flex items-center justify-center border border-white shadow-md">
+                  {cartCount}
+                </span>
+              )}
+            </button>
+
+            {/* Notifications Bell */}
+            <div className="relative">
+              <button
+                onClick={() => setShowNotifications(!showNotifications)}
+                className="p-2 hover:bg-slate-100 rounded-xl text-slate-500 hover:text-teal-700 transition relative"
+                title={currentUser?.role === 'admin' ? "FCM Cloud Alerts" : "Notifications"}
+              >
+                <Bell className="w-5 h-5" />
+                {unreadCount > 0 && (
+                  <span className="absolute top-0 right-0 bg-rose-500 text-white font-mono text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center border border-white animate-bounce">
+                    {unreadCount}
+                  </span>
+                )}
+              </button>
+
+              {showNotifications && (
+                <div className="absolute right-0 mt-2.5 w-80 sm:w-96 bg-white rounded-2xl shadow-2xl border border-slate-100 z-50 text-slate-800 overflow-hidden">
+                  <div className="bg-slate-50 px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-800 tracking-wide flex items-center gap-1.5 uppercase">
+                      <span className="w-2 h-2 bg-teal-600 rounded-full animate-pulse"></span>
+                      {currentUser?.role === 'admin' ? "FCM Cloud Push Logs" : "My Notifications"}
+                    </span>
+                    {unreadCount > 0 && (
+                      <button
+                        onClick={markAllNotifsRead}
+                        className="text-[10px] font-bold text-teal-700 hover:text-teal-900 uppercase"
+                      >
+                        Clear All
+                      </button>
+                    )}
+                  </div>
+                  <div className="max-h-80 overflow-y-auto divide-y divide-slate-100">
+                    {displayedNotifications.length === 0 ? (
+                      <div className="p-8 text-center text-slate-400">
+                        <HelpCircle className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                        <p className="text-xs">No notifications logged.</p>
+                      </div>
+                    ) : (
+                      displayedNotifications.map((notif) => (
+                        <div
+                          key={notif.id}
+                          onClick={() => handleNotificationClick(notif.id)}
+                          className={`p-3.5 transition text-left cursor-pointer ${
+                            !notif.read ? 'bg-teal-50/40 hover:bg-teal-50' : 'hover:bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-1">
+                            <h5 className="text-xs font-bold text-slate-900 leading-tight">
+                              {notif.title}
+                            </h5>
+                            {!notif.read && (
+                              <span className="w-2 h-2 bg-teal-600 rounded-full shrink-0 mt-1"></span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-600 mt-1 leading-normal">
+                            {notif.message}
+                          </p>
+                          <div className="flex items-center gap-1 text-[10px] text-slate-400 mt-2">
+                            <Clock className="w-3 h-3 text-slate-300" />
+                            <span>{new Date(notif.createdAt).toLocaleTimeString()}</span>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Profile Menu Trigger */}
+            <div className="relative">
+              <button
+                onClick={() => setShowUserDropdown(!showUserDropdown)}
+                className="flex items-center gap-1 hover:bg-slate-50 border border-slate-200 p-1 px-2.5 rounded-xl transition"
+              >
+                <div className="bg-slate-100 text-slate-600 p-1 rounded-lg border border-slate-200">
+                  <UserIcon className="w-4 h-4 text-slate-600" />
+                </div>
+                <div className="hidden sm:block text-left max-w-[90px] truncate leading-none">
+                  <p className="text-[11px] font-bold text-slate-800 truncate">
+                    {currentUser ? currentUser.name : 'Sign In'}
+                  </p>
+                  <p className="text-[9px] text-slate-400 capitalize font-medium">
+                    {currentUser ? currentUser.role.replace('_', ' ') : 'Guest'}
+                  </p>
+                </div>
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+              </button>
+
+              {showUserDropdown && (
+                <div className="absolute right-0 mt-2.5 w-60 bg-white rounded-2xl shadow-2xl border border-slate-100 py-2.5 text-slate-800 z-50 overflow-hidden font-sans">
+                  {currentUser ? (
+                    <>
+                      <div className="px-4 py-2.5 border-b border-slate-100 bg-slate-50">
+                        <p className="text-xs font-bold text-slate-900">{currentUser.name}</p>
+                        <p className="text-[10px] text-slate-400 font-mono mt-0.5">{currentUser.email}</p>
+                      </div>
+
+                      {/* Role Specific Shortcuts */}
+                      {(currentUser.role === 'super_admin' || currentUser.role === 'admin') && (
+                        <button
+                          onClick={() => { onNavigate('admin-panel'); setShowUserDropdown(false); }}
+                          className="w-full text-left px-4 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50 flex items-center gap-2 transition"
+                        >
+                          <SlidersHorizontal className="w-4 h-4 text-rose-500" />
+                          Launch Admin Desk
+                        </button>
+                      )}
+
+                      {currentUser.role === 'vendor' && (
+                        <button
+                          onClick={() => { onNavigate('vendor-panel'); setShowUserDropdown(false); }}
+                          className="w-full text-left px-4 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-50 flex items-center gap-2 transition"
+                        >
+                          <Store className="w-4 h-4 text-emerald-600" />
+                          Launch Vendor Desk
+                        </button>
+                      )}
+
+                      <button
+                        onClick={() => { onNavigate('marketplace'); setShowUserDropdown(false); }}
+                        className="w-full text-left px-4 py-2 text-xs hover:bg-slate-50 text-slate-700 flex items-center gap-2 transition"
+                      >
+                        <Activity className="w-4 h-4 text-slate-400" />
+                        Browse Marketplace
+                      </button>
+
+                      <div className="border-t border-slate-100 my-1.5"></div>
+                      <button
+                        onClick={() => { onLogout(); setShowUserDropdown(false); }}
+                        className="w-full text-left px-4 py-2 text-xs text-rose-600 hover:bg-rose-50 flex items-center gap-2 font-medium transition"
+                      >
+                        <LogOut className="w-4 h-4 text-rose-500" />
+                        Log Out
+                      </button>
+                    </>
+                  ) : (
+                    <div className="p-3">
+                      <p className="text-[11px] text-slate-500 mb-3 text-center leading-relaxed">
+                        Sign in to connect, submit RFQs, and track equipment shipments.
+                      </p>
+                      <button
+                        onClick={() => { onNavigate('login'); setShowUserDropdown(false); }}
+                        className="w-full bg-teal-700 hover:bg-teal-800 text-white text-xs font-bold py-2 rounded-lg text-center transition"
+                      >
+                        Access Portal
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+          </div>
+
+        </div>
+      </div>
+    </header>
+  );
+}
