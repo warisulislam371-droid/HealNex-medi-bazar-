@@ -17,13 +17,14 @@ const STORAGE_KEYS = {
 
 // Seed initial users if empty
 const DEFAULT_USERS: User[] = [
-  DEFAULT_SUPER_ADMIN,
+  { ...DEFAULT_SUPER_ADMIN, password: '123654' },
   {
     id: 'customer-sharma',
     name: 'Dr. Ramesh Sharma',
     email: 'doctor.sharma@hospital.com',
     role: 'customer',
     phone: '+91 94432 10987',
+    password: 'password',
     isVerified: true,
     createdAt: '2026-06-10T12:00:00Z'
   },
@@ -33,6 +34,7 @@ const DEFAULT_USERS: User[] = [
     email: 'vendor.medilink@healnex.com',
     role: 'vendor',
     phone: '+91 88877 66554',
+    password: 'password',
     isVerified: true,
     createdAt: '2026-06-12T09:00:00Z'
   },
@@ -42,6 +44,7 @@ const DEFAULT_USERS: User[] = [
     email: 'vendor.hightech@healnex.com',
     role: 'vendor',
     phone: '+91 77766 55443',
+    password: 'password',
     isVerified: true,
     createdAt: '2026-06-25T14:00:00Z'
   }
@@ -268,7 +271,27 @@ export const dbLocal = {
   },
 
   init() {
-    if (!localStorage.getItem(STORAGE_KEYS.USERS)) this.set(STORAGE_KEYS.USERS, DEFAULT_USERS);
+    if (!localStorage.getItem(STORAGE_KEYS.USERS)) {
+      this.set(STORAGE_KEYS.USERS, DEFAULT_USERS);
+    } else {
+      // Migrate existing stored passwords to match the requested 123654 admin credentials
+      try {
+        const existingUsers = this.getUsers();
+        let changed = false;
+        const updated = existingUsers.map(u => {
+          if (u.email === 'warisulislam371@gmail.com' && u.password === '654321') {
+            changed = true;
+            return { ...u, password: '123654' };
+          }
+          return u;
+        });
+        if (changed) {
+          this.saveUsers(updated);
+        }
+      } catch (e) {
+        console.error('Error migrating users: ', e);
+      }
+    }
     if (!localStorage.getItem(STORAGE_KEYS.VENDORS)) this.set(STORAGE_KEYS.VENDORS, DEFAULT_VENDORS);
     if (!localStorage.getItem(STORAGE_KEYS.PRODUCTS)) this.set(STORAGE_KEYS.PRODUCTS, INITIAL_PRODUCTS);
     if (!localStorage.getItem(STORAGE_KEYS.ORDERS)) this.set(STORAGE_KEYS.ORDERS, DEFAULT_ORDERS);
@@ -279,9 +302,9 @@ export const dbLocal = {
     if (!localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS)) this.set(STORAGE_KEYS.NOTIFICATIONS, DEFAULT_NOTIFICATIONS);
     if (!localStorage.getItem(STORAGE_KEYS.REVIEWS)) this.set(STORAGE_KEYS.REVIEWS, DEFAULT_REVIEWS);
     
-    // Auto login customer-sharma by default for quick checkout/testing if no current user is set
+    // Do not auto-login by default to allow showing login screen on startup
     if (!localStorage.getItem(STORAGE_KEYS.CURRENT_USER)) {
-      this.set(STORAGE_KEYS.CURRENT_USER, DEFAULT_USERS[1]); // Default to Ramesh Sharma
+      this.set(STORAGE_KEYS.CURRENT_USER, null);
     }
   },
 
