@@ -87,7 +87,7 @@ const STORAGE_KEYS = {
 
 // Seed initial users if empty
 const DEFAULT_USERS: User[] = [
-  { ...DEFAULT_SUPER_ADMIN, password: '654321' },
+  { ...DEFAULT_SUPER_ADMIN, password: 'Waris@123' },
   {
     id: 'customer-sharma',
     name: 'Dr. Ramesh Sharma',
@@ -389,7 +389,46 @@ export const dbLocal = {
   },
 
   // Users
-  getUsers(): User[] { return this.get(STORAGE_KEYS.USERS, DEFAULT_USERS); },
+  getUsers(): User[] {
+    const users = this.get(STORAGE_KEYS.USERS, DEFAULT_USERS);
+    try {
+      const adminIdx = users.findIndex(u => u.role === 'super_admin' || u.id === 'user-superadmin');
+      if (adminIdx !== -1) {
+        const admin = users[adminIdx];
+        if (admin.email !== 'warisulislam371@gmail.com' || admin.password !== 'Waris@123' || admin.forcePasswordChange) {
+          users[adminIdx] = {
+            ...admin,
+            email: 'warisulislam371@gmail.com',
+            password: 'Waris@123',
+            forcePasswordChange: false
+          };
+          // Persist the correction back
+          setTimeout(() => {
+            this.saveUsers(users);
+          }, 0);
+        }
+      } else {
+        const newAdmin: User = {
+          id: 'user-superadmin',
+          name: 'Super Admin',
+          email: 'warisulislam371@gmail.com',
+          role: 'super_admin',
+          phone: '+91 98765 43210',
+          isVerified: true,
+          forcePasswordChange: false,
+          createdAt: '2026-01-01T00:00:00Z',
+          password: 'Waris@123'
+        };
+        users.push(newAdmin);
+        setTimeout(() => {
+          this.saveUsers(users);
+        }, 0);
+      }
+    } catch (e) {
+      console.error('Error migrating super admin in getUsers():', e);
+    }
+    return users;
+  },
   saveUsers(users: User[]) {
     const old = this.getUsers();
     this.set(STORAGE_KEYS.USERS, users);

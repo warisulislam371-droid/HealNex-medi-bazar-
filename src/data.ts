@@ -279,6 +279,6 @@ export const DEFAULT_SUPER_ADMIN: User = {
   role: 'super_admin',
   phone: '+91 98765 43210',
   isVerified: true,
-  forcePasswordChange: true,
+  forcePasswordChange: false,
   createdAt: '2026-01-01T00:00:00Z'
 };
