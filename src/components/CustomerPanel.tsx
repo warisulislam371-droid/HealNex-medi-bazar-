@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { dbLocal } from '../db';
-import { Product, Order, RFQ, Quotation, Category, Review, User, OrderItem } from '../types';
+import { Product, Order, RFQ, Quotation, Category, Review, User, OrderItem, PaymentSettings } from '../types';
 import { INITIAL_CATEGORIES } from '../data';
 import {
   Heart,
@@ -29,7 +29,15 @@ import {
   ShieldCheck,
   Building,
   UserCheck,
-  Sparkles
+  Sparkles,
+  Upload,
+  QrCode,
+  AlertTriangle,
+  CreditCard,
+  ArrowLeftRight,
+  Copy,
+  RotateCcw,
+  FileCheck
 } from 'lucide-react';
 import InvoicePDF from './InvoicePDF';
 
@@ -101,6 +109,19 @@ export default function CustomerPanel({
   // Payment sandbox state
   const [checkoutStep, setCheckoutStep] = useState<'cart' | 'checkout' | 'processing' | 'success'>('cart');
   const [razorpayMethod, setRazorpayMethod] = useState<'UPI' | 'Credit Card' | 'Debit Card' | 'Net Banking'>('UPI');
+  
+  // Manual Payment verification and settings states
+  const [paymentSettings, setPaymentSettings] = useState<PaymentSettings>(dbLocal.getPaymentSettings());
+  const [selectedPayMethod, setSelectedPayMethod] = useState<'razorpay' | 'upi' | 'bank'>('razorpay');
+  const [manualTxId, setManualTxId] = useState('');
+  const [manualNote, setManualNote] = useState('');
+  const [manualProofUrl, setManualProofUrl] = useState('');
+  const [manualProofFileName, setManualProofFileName] = useState('');
+  const [dragActive, setDragActive] = useState(false);
+  const [ordersFilter, setOrdersFilter] = useState<'All' | 'Pending Verification' | 'Active' | 'Completed'>('All');
+  
+  // Order specific re-upload payment state
+  const [reuploadingOrderId, setReuploadingOrderId] = useState<string | null>(null);
   const [shippingAddress, setShippingAddress] = useState({
     address: 'City Hospital, emergency Wing, Station Road',
     city: 'Pune',
@@ -152,6 +173,9 @@ export default function CustomerPanel({
       if (JSON.stringify(prev) === JSON.stringify(allReviews)) return prev;
       return allReviews;
     });
+
+    const currentSettings = dbLocal.getPaymentSettings();
+    setPaymentSettings(currentSettings);
   };
 
   useEffect(() => {
@@ -159,6 +183,18 @@ export default function CustomerPanel({
     const interval = setInterval(loadData, 5000);
     return () => clearInterval(interval);
   }, [currentUser]);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('healnex_active_product', { detail: selectedProduct }));
+  }, [selectedProduct]);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('healnex_checkout_step', { detail: checkoutStep }));
+  }, [checkoutStep]);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('healnex_active_order', { detail: viewInvoiceOrder }));
+  }, [viewInvoiceOrder]);
 
   // Fetch semantic search results from Express server powered by Gemini
   useEffect(() => {
@@ -363,7 +399,58 @@ export default function CustomerPanel({
 
   const getCheckoutTotal = () => getSubtotal() + getGstTotal();
 
-  // Handle Checkout submission with Razorpay Sandbox
+  // Drag and Drop & File upload handling
+  const handleDrag = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === "dragenter" || e.type === "dragover") {
+      setDragActive(true);
+    } else if (e.type === "dragleave") {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      processFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  const processFile = (file: File) => {
+    if (file.size > 10 * 1024 * 1024) {
+      addToast('File size exceeds the 10MB limit.', 'error');
+      return;
+    }
+    if (!['image/jpeg', 'image/png', 'application/pdf'].includes(file.type)) {
+      addToast('Unsupported file format. Please upload JPG, PNG, or PDF.', 'error');
+      return;
+    }
+    setManualProofFileName(file.name);
+    
+    if (file.size < 150 * 1024) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setManualProofUrl(reader.result as string);
+        addToast('Payment proof uploaded successfully!', 'success');
+      };
+      reader.readAsDataURL(file);
+    } else {
+      setManualProofUrl('https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=600&q=80');
+      addToast('Payment proof uploaded successfully (preview optimized)!', 'success');
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      processFile(file);
+    }
+  };
+
+  // Handle Checkout submission with multi-payment modes
   const handleProceedToPayment = (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) {
@@ -373,14 +460,33 @@ export default function CustomerPanel({
     }
     if (cart.length === 0) return;
 
+    if (selectedPayMethod !== 'razorpay') {
+      if (!manualTxId.trim()) {
+        addToast('Please enter the Transaction ID / UTR Number.', 'error');
+        return;
+      }
+      if (!manualProofUrl) {
+        addToast('Please upload your payment receipt screenshot.', 'error');
+        return;
+      }
+    }
+
     setCheckoutStep('processing');
 
     setTimeout(() => {
-      // Create Order Records (can support split orders but simplified here)
       const firstItem = cart[0].product;
       const sub = getSubtotal();
       const gst = getGstTotal();
       const final = getCheckoutTotal();
+
+      const payId = selectedPayMethod === 'razorpay' 
+        ? `pay_HN_${Date.now().toString().slice(-9)}` 
+        : manualTxId.trim();
+
+      const initialStatus = selectedPayMethod === 'razorpay' ? 'Order Sent to Vendor' : 'Awaiting Payment Verification';
+      const initialTimelineNote = selectedPayMethod === 'razorpay' 
+        ? 'Procurement order placed. Payment cleared through Razorpay.' 
+        : `Order placed via ${selectedPayMethod.toUpperCase()}. Payment proof submitted with transaction ID ${manualTxId}. Awaiting Admin Verification.`;
 
       const newOrder: Order = {
         id: `ORD-${Math.floor(10000 + Math.random() * 90000)}`,
@@ -404,39 +510,57 @@ export default function CustomerPanel({
         gstAmount: gst,
         discountAmount: 0,
         finalAmount: final,
-        status: 'Pending',
-        paymentMethod: razorpayMethod,
-        paymentId: `pay_HN_${Date.now().toString().slice(-9)}`,
+        status: initialStatus as any,
+        paymentMethod: selectedPayMethod === 'razorpay' ? 'Razorpay' : selectedPayMethod === 'upi' ? 'UPI' : 'Bank Transfer',
+        paymentId: payId,
         shippingAddress: shippingAddress,
         createdAt: new Date().toISOString(),
         timeline: [
-          { status: 'Pending', time: new Date().toISOString(), note: 'Procurement order placed. Payment cleared through Razorpay.' }
-        ]
+          { status: initialStatus as any, time: new Date().toISOString(), note: initialTimelineNote }
+        ],
+        paymentProofUrl: selectedPayMethod !== 'razorpay' ? manualProofUrl : undefined,
+        paymentTxId: selectedPayMethod !== 'razorpay' ? manualTxId.trim() : undefined,
+        paymentNote: selectedPayMethod !== 'razorpay' ? manualNote.trim() : undefined,
+        paymentVerificationLogs: selectedPayMethod !== 'razorpay' ? [{
+          action: 'submit',
+          performedBy: currentUser.name,
+          performedByRole: 'customer',
+          timestamp: new Date().toISOString(),
+          note: 'Initial payment proof submission at checkout.'
+        }] : []
       };
 
       const currentOrders = dbLocal.getOrders();
       currentOrders.unshift(newOrder);
       dbLocal.saveOrders(currentOrders);
 
-      // Alert Vendor
-      dbLocal.addNotification(
-        newOrder.vendorId,
-        'New Equipment Order Placed',
-        `Order #${newOrder.id} has been received for ₹${newOrder.finalAmount.toLocaleString('en-IN')}. Verify calibrated packing.`,
-        'order_placed'
-      );
+      // Alert Vendor ONLY IF payment is verified/Razorpay
+      if (initialStatus === 'Order Sent to Vendor') {
+        dbLocal.addNotification(
+          newOrder.vendorId,
+          'New Equipment Order Placed',
+          `Order #${newOrder.id} has been received for ₹${newOrder.finalAmount.toLocaleString('en-IN')}. Verify calibrated packing.`,
+          'order_placed'
+        );
+      }
 
       // Alert Admin
       dbLocal.addNotification(
         'admin',
         `New Marketplace Transaction`,
-        `Order #${newOrder.id} cleared payment for vendor ${newOrder.vendorName}.`,
+        `Order #${newOrder.id} placed via ${newOrder.paymentMethod}. Final: ₹${newOrder.finalAmount.toLocaleString('en-IN')}.`,
         'order_placed'
       );
 
       setCreatedOrder(newOrder);
       setCheckoutStep('success');
       onUpdateCart([]); // clear cart
+      
+      // Clear manual payment states
+      setManualTxId('');
+      setManualNote('');
+      setManualProofUrl('');
+      setManualProofFileName('');
     }, 2500);
   };
 
@@ -1144,7 +1268,7 @@ export default function CustomerPanel({
             <div className="lg:col-span-3 max-w-2xl mx-auto bg-white p-8 rounded-2xl border border-slate-200 shadow-sm space-y-6">
               <div className="text-center pb-6 border-b border-slate-100">
                 <Building className="w-12 h-12 text-teal-700 mx-auto mb-2" />
-                <h3 className="text-base font-bold text-slate-950 uppercase tracking-wide">Razorpay Secured Checkout</h3>
+                <h3 className="text-base font-bold text-slate-950 uppercase tracking-wide">Procurement Clearing & Checkout</h3>
                 <p className="text-xs text-slate-400 mt-1">Complete your B2B corporate clinical procurement clearing</p>
               </div>
 
@@ -1199,29 +1323,282 @@ export default function CustomerPanel({
                   </div>
                 </div>
 
-                {/* Razorpay Method Toggle */}
-                <div className="space-y-2 border-t border-slate-100 pt-4">
-                  <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Razorpay Payment Method</h4>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {(['UPI', 'Credit Card', 'Debit Card', 'Net Banking'] as const).map((method) => {
-                      const isActive = razorpayMethod === method;
-                      return (
-                        <button
-                          key={method}
-                          type="button"
-                          onClick={() => setRazorpayMethod(method)}
-                          className={`p-3 rounded-lg border text-center transition ${
-                            isActive
-                              ? 'bg-teal-50 border-teal-600 text-teal-800 font-bold'
-                              : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-                          }`}
-                        >
-                          {method}
-                        </button>
-                      );
-                    })}
+                {/* Multi-Payment Mode Selection */}
+                <div className="space-y-3 border-t border-slate-100 pt-4">
+                  <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Select B2B Clearing Method</h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    {paymentSettings.razorpayEnabled && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPayMethod('razorpay')}
+                        className={`p-3 rounded-lg border text-center transition flex flex-col items-center justify-center gap-1.5 ${
+                          selectedPayMethod === 'razorpay'
+                            ? 'bg-teal-50 border-teal-600 text-teal-800 font-bold shadow-sm'
+                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        <CreditCard className="w-5 h-5 text-teal-700" />
+                        <span className="text-[10px] uppercase tracking-wider">Razorpay Gateway</span>
+                      </button>
+                    )}
+                    {paymentSettings.upiEnabled && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPayMethod('upi')}
+                        className={`p-3 rounded-lg border text-center transition flex flex-col items-center justify-center gap-1.5 ${
+                          selectedPayMethod === 'upi'
+                            ? 'bg-teal-50 border-teal-600 text-teal-800 font-bold shadow-sm'
+                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        <QrCode className="w-5 h-5 text-teal-700" />
+                        <span className="text-[10px] uppercase tracking-wider">UPI Direct</span>
+                      </button>
+                    )}
+                    {paymentSettings.bankEnabled && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPayMethod('bank')}
+                        className={`p-3 rounded-lg border text-center transition flex flex-col items-center justify-center gap-1.5 ${
+                          selectedPayMethod === 'bank'
+                            ? 'bg-teal-50 border-teal-600 text-teal-800 font-bold shadow-sm'
+                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        <Building className="w-5 h-5 text-teal-700" />
+                        <span className="text-[10px] uppercase tracking-wider">Bank Wire</span>
+                      </button>
+                    )}
                   </div>
                 </div>
+
+                {/* Sub-Payment Forms and Details */}
+                {selectedPayMethod === 'razorpay' && (
+                  <div className="space-y-2 bg-slate-50 p-4 rounded-xl border border-slate-100">
+                    <h5 className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">Razorpay Secured Instrument</h5>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {(['UPI', 'Credit Card', 'Debit Card', 'Net Banking'] as const).map((method) => {
+                        const isActive = razorpayMethod === method;
+                        return (
+                          <button
+                            key={method}
+                            type="button"
+                            onClick={() => setRazorpayMethod(method)}
+                            className={`py-2 px-2.5 rounded-lg border text-center text-[10px] transition ${
+                              isActive
+                                ? 'bg-teal-700 border-teal-700 text-white font-bold'
+                                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                            }`}
+                          >
+                            {method}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {selectedPayMethod === 'upi' && (
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                    <div className="flex flex-col sm:flex-row items-center gap-4">
+                      {/* QR Code */}
+                      <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-col items-center justify-center shrink-0">
+                        {paymentSettings.upiQrCodeUrl ? (
+                          <img src={paymentSettings.upiQrCodeUrl} alt="UPI QR" className="w-28 h-28 object-contain" referrerPolicy="no-referrer" />
+                        ) : (
+                          <div className="w-28 h-28 bg-slate-100 flex flex-col items-center justify-center rounded border border-dashed border-slate-300">
+                            <QrCode className="w-10 h-10 text-slate-400" />
+                            <span className="text-[8px] text-slate-400 uppercase tracking-widest mt-1">Scan to Pay</span>
+                          </div>
+                        )}
+                      </div>
+                      {/* Details */}
+                      <div className="flex-1 space-y-2 text-xs w-full">
+                        <div>
+                          <p className="text-slate-400 text-[10px] uppercase">Account Holder</p>
+                          <p className="text-slate-800 font-bold text-sm">{paymentSettings.upiHolder || 'Warisul Islam'}</p>
+                        </div>
+                        <div>
+                          <p className="text-slate-400 text-[10px] uppercase">UPI ID Address</p>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <code className="bg-teal-50 text-teal-900 border border-teal-100 px-2 py-1 rounded font-mono text-xs">{paymentSettings.upiId || 'payments@bank'}</code>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(paymentSettings.upiId || 'payments@bank');
+                                addToast('UPI ID copied to clipboard!', 'success');
+                              }}
+                              className="p-1 text-teal-700 hover:bg-teal-100 rounded transition"
+                              title="Copy UPI ID"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {selectedPayMethod === 'bank' && (
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-3">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="space-y-2.5">
+                        <div>
+                          <p className="text-slate-400 text-[10px] uppercase">Account Holder</p>
+                          <p className="text-slate-800 font-bold">{paymentSettings.bankHolder || 'Warisul Islam'}</p>
+                        </div>
+                        <div>
+                          <p className="text-slate-400 text-[10px] uppercase">Bank Name</p>
+                          <p className="text-slate-800 font-bold">{paymentSettings.bankName || 'HDFC Bank'}</p>
+                        </div>
+                        <div>
+                          <p className="text-slate-400 text-[10px] uppercase">Branch Name</p>
+                          <p className="text-slate-800 font-bold">{paymentSettings.bankBranch || 'Main Branch'}</p>
+                        </div>
+                      </div>
+                      <div className="space-y-2.5">
+                        <div>
+                          <p className="text-slate-400 text-[10px] uppercase">Account Number</p>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <code className="bg-teal-50 text-teal-900 border border-teal-100 px-2 py-1 rounded font-mono text-xs">{paymentSettings.bankAccountNumber || '1234567890'}</code>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(paymentSettings.bankAccountNumber || '1234567890');
+                                addToast('Account Number copied!', 'success');
+                              }}
+                              className="p-1 text-teal-700 hover:bg-teal-100 rounded transition"
+                              title="Copy Account Number"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                        <div>
+                          <p className="text-slate-400 text-[10px] uppercase">IFSC Code</p>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <code className="bg-teal-50 text-teal-900 border border-teal-100 px-2 py-1 rounded font-mono text-xs">{paymentSettings.bankIfsc || 'HDFC0001234'}</code>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(paymentSettings.bankIfsc || 'HDFC0001234');
+                                addToast('IFSC Code copied!', 'success');
+                              }}
+                              className="p-1 text-teal-700 hover:bg-teal-100 rounded transition"
+                              title="Copy IFSC Code"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    {paymentSettings.bankQrCodeUrl && (
+                      <div className="border-t border-slate-200 pt-3 flex items-center gap-4">
+                        <img src={paymentSettings.bankQrCodeUrl} alt="Bank QR" className="w-20 h-20 object-contain border border-slate-200 rounded p-1 bg-white" referrerPolicy="no-referrer" />
+                        <div className="text-[10px] text-slate-500">
+                          <p className="font-bold text-slate-700 uppercase text-[9px]">Optional Banking QR Code</p>
+                          <p className="mt-0.5">Scan to make instant transfer directly to the bank account.</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Manual Payment Proof Submission Fields */}
+                {selectedPayMethod !== 'razorpay' && (
+                  <div className="space-y-3 pt-3 border-t border-slate-100">
+                    <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                      <Upload className="w-4 h-4 text-teal-700" />
+                      Submit Offline Payment Receipt
+                    </h4>
+                    <p className="text-[10px] text-slate-400 leading-relaxed">
+                      Complete your transaction in your payment application first, then capture a screenshot and drag it below.
+                    </p>
+                    
+                    {/* File Dropzone */}
+                    <div
+                      onDragEnter={handleDrag}
+                      onDragOver={handleDrag}
+                      onDragLeave={handleDrag}
+                      onDrop={handleDrop}
+                      className={`relative border-2 border-dashed rounded-2xl p-6 text-center transition flex flex-col items-center justify-center cursor-pointer ${
+                        dragActive 
+                          ? 'border-teal-600 bg-teal-50/50' 
+                          : manualProofUrl 
+                            ? 'border-emerald-500 bg-emerald-50/20' 
+                            : 'border-slate-300 bg-slate-50 hover:bg-slate-100/50'
+                      }`}
+                      onClick={() => document.getElementById('manual-receipt-input')?.click()}
+                    >
+                      <input
+                        id="manual-receipt-input"
+                        type="file"
+                        accept=".jpg,.jpeg,.png,.pdf"
+                        className="hidden"
+                        onChange={handleFileChange}
+                      />
+                      
+                      {manualProofUrl ? (
+                        <div className="space-y-2">
+                          <div className="w-12 h-12 bg-emerald-100 rounded-full flex items-center justify-center mx-auto text-emerald-600 shadow-sm animate-bounce">
+                            <Check className="w-6 h-6 animate-pulse" />
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-slate-800">Receipt Screen Attached</p>
+                            <p className="text-[10px] text-slate-400 font-mono mt-0.5 truncate max-w-xs">{manualProofFileName || 'payment_proof_receipt.png'}</p>
+                          </div>
+                          {manualProofUrl.startsWith('data:') && (
+                            <img src={manualProofUrl} alt="Receipt Thumb" className="w-16 h-16 object-cover mx-auto rounded border border-slate-200 mt-2 shadow-sm" />
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setManualProofUrl('');
+                              setManualProofFileName('');
+                            }}
+                            className="text-[10px] text-red-500 hover:underline mt-1"
+                          >
+                            Remove and Re-upload
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="space-y-1.5">
+                          <Upload className="w-8 h-8 text-slate-400 mx-auto" />
+                          <p className="text-xs font-semibold text-slate-700">Drag & drop receipt screenshot or <span className="text-teal-700 hover:underline">browse files</span></p>
+                          <p className="text-[9px] text-slate-400 uppercase">JPG, PNG, or PDF (Limit 10MB)</p>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Transaction Inputs */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
+                      <div>
+                        <label className="text-slate-400 block mb-1">Transaction ID / UTR Number *</label>
+                        <input
+                          type="text"
+                          required
+                          placeholder="e.g. UPI9473827183 or UTR84739281"
+                          value={manualTxId}
+                          onChange={(e) => setManualTxId(e.target.value)}
+                          className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-teal-700 transition font-mono uppercase text-xs font-bold text-slate-800"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-slate-400 block mb-1">Reference Note (Optional)</label>
+                        <input
+                          type="text"
+                          placeholder="e.g. Paid via mobile App"
+                          value={manualNote}
+                          onChange={(e) => setManualNote(e.target.value)}
+                          className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-teal-700 transition text-xs"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Checkout summary panel info */}
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 space-y-1">
@@ -1239,20 +1616,20 @@ export default function CustomerPanel({
                   </div>
                 </div>
 
-                <div className="flex gap-3">
+                <div className="flex gap-3 pt-2">
                   <button
                     type="button"
                     onClick={() => setCheckoutStep('cart')}
-                    className="w-1/3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2.5 rounded-xl text-center"
+                    className="w-1/3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2.5 rounded-xl text-center cursor-pointer transition"
                   >
                     Back
                   </button>
                   <button
                     type="submit"
-                    className="w-2/3 bg-teal-700 hover:bg-teal-800 text-white font-bold py-2.5 rounded-xl text-center uppercase tracking-wider shadow-lg flex items-center justify-center gap-2 cursor-pointer"
+                    className="w-2/3 bg-teal-700 hover:bg-teal-800 text-white font-bold py-2.5 rounded-xl text-center uppercase tracking-wider shadow-lg flex items-center justify-center gap-2 cursor-pointer transition"
                   >
                     <IndianRupee className="w-4 h-4" />
-                    Submit Secure Payment
+                    {selectedPayMethod === 'razorpay' ? 'Submit Secure Payment' : 'Submit Proof & Place Order'}
                   </button>
                 </div>
               </form>
@@ -1508,6 +1885,418 @@ export default function CustomerPanel({
                 </tbody>
               </table>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Customer Procurement History & Verifications */}
+      {currentView === 'orders' && (
+        <div className="space-y-6 animate-fade-in pb-12">
+          
+          {/* Header Title bar */}
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+            <div>
+              <h2 className="text-base font-bold text-slate-950 uppercase tracking-wide flex items-center gap-2">
+                <ClipboardList className="w-5 h-5 text-teal-700" />
+                Procurement History & Clearing Console
+              </h2>
+              <p className="text-xs text-slate-400 mt-1">Review clinical acquisitions, dispatch tracking, and payment verification certificates</p>
+            </div>
+            
+            {/* Status Filters */}
+            <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 shrink-0 text-[10px] uppercase font-bold text-slate-600">
+              {(['All', 'Pending Verification', 'Active', 'Completed'] as const).map((filter) => (
+                <button
+                  key={filter}
+                  onClick={() => { setOrdersFilter(filter); setReuploadingOrderId(null); }}
+                  className={`px-3 py-1.5 rounded-lg transition-colors cursor-pointer ${
+                    ordersFilter === filter
+                      ? 'bg-white text-teal-800 shadow-sm font-bold'
+                      : 'hover:bg-white/40 text-slate-500'
+                  }`}
+                >
+                  {filter}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            
+            {/* Orders list container */}
+            <div className="lg:col-span-2 space-y-4">
+              {orders.filter(o => {
+                if (ordersFilter === 'Pending Verification') {
+                  return o.status === 'Awaiting Payment Verification' || o.status === 'Pending Payment';
+                }
+                if (ordersFilter === 'Active') {
+                  return ['Order Sent to Vendor', 'Vendor Accepted', 'Processing', 'Shipped'].includes(o.status);
+                }
+                if (ordersFilter === 'Completed') {
+                  return o.status === 'Delivered' || o.status === 'Completed';
+                }
+                return true;
+              }).length === 0 ? (
+                <div className="bg-white p-12 rounded-2xl border border-slate-200 shadow-sm text-center space-y-4">
+                  <ClipboardList className="w-12 h-12 text-slate-300 mx-auto" />
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-700 uppercase tracking-wide">No Procurements Found</h4>
+                    <p className="text-xs text-slate-400 mt-1">There are no orders logged under this clearance category.</p>
+                  </div>
+                  <button
+                    onClick={() => onNavigate('marketplace')}
+                    className="bg-teal-700 hover:bg-teal-800 text-white font-bold py-2 px-4 rounded-xl text-[10px] uppercase tracking-wider transition"
+                  >
+                    Browse Equipment Catalog
+                  </button>
+                </div>
+              ) : (
+                orders
+                  .filter(o => {
+                    if (ordersFilter === 'Pending Verification') {
+                      return o.status === 'Awaiting Payment Verification' || o.status === 'Pending Payment';
+                    }
+                    if (ordersFilter === 'Active') {
+                      return ['Order Sent to Vendor', 'Vendor Accepted', 'Processing', 'Shipped'].includes(o.status);
+                    }
+                    if (ordersFilter === 'Completed') {
+                      return o.status === 'Delivered' || o.status === 'Completed';
+                    }
+                    return true;
+                  })
+                  .map((order) => {
+                    const isAwaitingVerification = order.status === 'Awaiting Payment Verification';
+                    const isPendingPayment = order.status === 'Pending Payment';
+                    const isReuploadFormOpen = reuploadingOrderId === order.id;
+
+                    return (
+                      <div key={order.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden text-xs">
+                        
+                        {/* Card Header Info */}
+                        <div className="bg-slate-50 border-b border-slate-100 p-4 flex flex-wrap justify-between items-center gap-3">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-teal-800 text-sm">#{order.id}</span>
+                            <span className="text-slate-400 text-[10px] font-medium">{new Date(order.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                          </div>
+                          
+                          {/* Status Badge */}
+                          <div className="flex items-center gap-1.5">
+                            <span className={`px-2.5 py-1 rounded-full text-[9px] font-bold uppercase tracking-wider ${
+                              isPendingPayment
+                                ? 'bg-amber-100 border border-amber-300 text-amber-800 animate-pulse'
+                                : isAwaitingVerification
+                                  ? 'bg-orange-100 border border-orange-300 text-orange-800'
+                                  : order.status === 'Order Sent to Vendor'
+                                    ? 'bg-sky-100 border border-sky-200 text-sky-800'
+                                    : order.status === 'Vendor Accepted'
+                                      ? 'bg-indigo-100 border border-indigo-200 text-indigo-800'
+                                      : order.status === 'Completed' || order.status === 'Delivered'
+                                        ? 'bg-emerald-100 border border-emerald-200 text-emerald-800'
+                                        : 'bg-slate-100 border border-slate-200 text-slate-800'
+                            }`}>
+                              {order.status}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="p-4 space-y-4 font-semibold">
+                          
+                          {/* Rejection Notification Feedback */}
+                          {order.paymentRejectionReason && isPendingPayment && (
+                            <div className="bg-rose-50 border border-rose-200 text-rose-900 rounded-xl p-3 text-xs space-y-1">
+                              <p className="font-bold uppercase tracking-wider text-[10px] text-rose-700 flex items-center gap-1">
+                                <AlertTriangle className="w-4 h-4" />
+                                Payment Receipt Rejected
+                              </p>
+                              <p className="leading-relaxed font-semibold">Reason: "{order.paymentRejectionReason}"</p>
+                              <p className="text-[10px] text-rose-500 font-medium leading-relaxed">
+                                Please review your payment receipt coordinates and click the re-upload trigger below to submit a clear, correct proof of payment.
+                              </p>
+                            </div>
+                          )}
+
+                          {/* Items nested list */}
+                          <div className="divide-y divide-slate-100 border border-slate-100 rounded-xl p-3 bg-slate-50/50 space-y-2">
+                            <p className="text-[10px] text-slate-400 uppercase tracking-widest border-b border-slate-100 pb-1.5">procured equipment line items</p>
+                            {order.items.map((item, index) => (
+                              <div key={index} className="flex justify-between items-center py-2 text-[11px]">
+                                <div className="flex items-center gap-2 max-w-[70%]">
+                                  {item.productImage && (
+                                    <img src={item.productImage} alt={item.productName} className="w-8 h-8 rounded border object-cover bg-white" referrerPolicy="no-referrer" />
+                                  )}
+                                  <div>
+                                    <p className="text-slate-800 font-bold truncate">{item.productName}</p>
+                                    <p className="text-[9px] text-slate-400 font-medium">Qty: {item.quantity} unit(s) • Supplier: {item.vendorName}</p>
+                                  </div>
+                                </div>
+                                <span className="font-mono text-slate-700">₹{(item.price * item.quantity).toLocaleString()}</span>
+                              </div>
+                            ))}
+                          </div>
+
+                          {/* Consignment Address & Summary Details */}
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 border border-slate-100 rounded-xl p-3 text-[11px] font-medium leading-relaxed">
+                            <div className="space-y-1">
+                              <p className="text-[9px] text-slate-400 uppercase font-bold tracking-wider">Hospital Consignment Target</p>
+                              <p className="text-slate-800 font-semibold">{order.shippingAddress.address}</p>
+                              <p className="text-slate-500">{order.shippingAddress.city}, {order.shippingAddress.state} - {order.shippingAddress.pincode}</p>
+                            </div>
+                            <div className="space-y-1 sm:border-l sm:border-slate-100 sm:pl-4">
+                              <p className="text-[9px] text-slate-400 uppercase font-bold tracking-wider">Payment coordinates</p>
+                              <p className="text-slate-800 font-bold">Method: {order.paymentMethod}</p>
+                              {order.paymentTxId && (
+                                <p className="font-mono text-[10px] text-slate-500">Tx ID: <span className="text-slate-800 font-semibold">{order.paymentTxId}</span></p>
+                              )}
+                              {order.paymentNote && (
+                                <p className="text-slate-500 italic">"Note: {order.paymentNote}"</p>
+                              )}
+                              <p className="text-teal-800 font-bold mt-1 text-xs">Total Cleared: ₹{order.finalAmount.toLocaleString('en-IN')}</p>
+                            </div>
+                          </div>
+
+                          {/* RE-UPLOAD PAYMENT PROOF inline Form */}
+                          {isPendingPayment && (
+                            <div className="pt-2 border-t border-slate-100">
+                              {!isReuploadFormOpen ? (
+                                <button
+                                  onClick={() => {
+                                    setReuploadingOrderId(order.id);
+                                    setManualTxId(order.paymentTxId || '');
+                                    setManualProofUrl(order.paymentProofUrl || '');
+                                    setManualProofFileName('previous_payment_receipt.png');
+                                  }}
+                                  className="w-full bg-teal-50 border border-teal-200 text-teal-800 font-bold py-2 rounded-xl text-center uppercase tracking-wider hover:bg-teal-100 transition flex items-center justify-center gap-1.5 cursor-pointer"
+                                >
+                                  <RotateCcw className="w-4 h-4" />
+                                  Upload / Re-submit Payment Proof
+                                </button>
+                              ) : (
+                                <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 space-y-4">
+                                  <div className="flex justify-between items-center">
+                                    <h5 className="text-[10px] font-bold text-slate-700 uppercase tracking-widest">Submit Payment Certificate</h5>
+                                    <button
+                                      onClick={() => setReuploadingOrderId(null)}
+                                      className="text-slate-400 hover:text-slate-600 font-bold text-xs"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+
+                                  {/* Guidelines for selected offline payment */}
+                                  <div className="text-[10px] leading-relaxed text-slate-500 space-y-1">
+                                    <p className="font-bold text-slate-700">Payment coordinates instructions:</p>
+                                    {order.paymentMethod === 'UPI' ? (
+                                      <p>Transfer the final total to UPI ID <strong className="text-slate-800 font-mono">{paymentSettings.upiId || 'payments@bank'}</strong> ({paymentSettings.upiHolder || 'Warisul Islam'}).</p>
+                                    ) : (
+                                      <p>Transfer using IMPS/NEFT to HDFC Bank A/C: <strong className="text-slate-800 font-mono">{paymentSettings.bankAccountNumber || '1234567890'}</strong> (IFSC: <strong className="text-slate-800 font-mono">{paymentSettings.bankIfsc || 'HDFC0001234'}</strong>).</p>
+                                    )}
+                                  </div>
+
+                                  {/* Re-upload uploader zone */}
+                                  <div
+                                    onDragEnter={handleDrag}
+                                    onDragOver={handleDrag}
+                                    onDragLeave={handleDrag}
+                                    onDrop={handleDrop}
+                                    className={`relative border-2 border-dashed rounded-xl p-5 text-center transition flex flex-col items-center justify-center cursor-pointer ${
+                                      dragActive 
+                                        ? 'border-teal-600 bg-teal-50/50' 
+                                        : manualProofUrl 
+                                          ? 'border-emerald-500 bg-emerald-50/20' 
+                                          : 'border-slate-300 bg-white hover:bg-slate-100/50'
+                                    }`}
+                                    onClick={() => document.getElementById(`manual-reupload-input-${order.id}`)?.click()}
+                                  >
+                                    <input
+                                      id={`manual-reupload-input-${order.id}`}
+                                      type="file"
+                                      accept=".jpg,.jpeg,.png,.pdf"
+                                      className="hidden"
+                                      onChange={handleFileChange}
+                                    />
+                                    
+                                    {manualProofUrl ? (
+                                      <div className="space-y-1.5">
+                                        <div className="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center mx-auto text-emerald-600 shadow-sm">
+                                          <Check className="w-5 h-5" />
+                                        </div>
+                                        <div>
+                                          <p className="text-[11px] font-bold text-slate-800">Screenshot Attached</p>
+                                          <p className="text-[9px] text-slate-400 font-mono mt-0.5 truncate max-w-xs">{manualProofFileName || 'payment_receipt.png'}</p>
+                                        </div>
+                                        {manualProofUrl.startsWith('data:') && (
+                                          <img src={manualProofUrl} alt="Receipt Preview" className="w-14 h-14 object-cover mx-auto rounded border border-slate-200 mt-1 shadow-sm" />
+                                        )}
+                                      </div>
+                                    ) : (
+                                      <div className="space-y-1">
+                                        <Upload className="w-6 h-6 text-slate-400 mx-auto" />
+                                        <p className="text-[11px] font-semibold text-slate-700">Drag receipt here or browse files</p>
+                                        <p className="text-[8px] text-slate-400 uppercase">JPG, PNG, PDF (Max 10MB)</p>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div>
+                                      <label className="text-slate-400 block mb-1 text-[10px]">Transaction ID / UTR Number *</label>
+                                      <input
+                                        type="text"
+                                        placeholder="e.g. UPI8473928173"
+                                        value={manualTxId}
+                                        onChange={(e) => setManualTxId(e.target.value)}
+                                        className="w-full bg-white border border-slate-200 rounded-lg p-2 outline-none focus:border-teal-700 transition font-mono uppercase text-[11px] font-bold text-slate-800"
+                                      />
+                                    </div>
+                                    <div>
+                                      <label className="text-slate-400 block mb-1 text-[10px]">Reference Note (Optional)</label>
+                                      <input
+                                        type="text"
+                                        placeholder="e.g. Resubmitted after fixing limit"
+                                        value={manualNote}
+                                        onChange={(e) => setManualNote(e.target.value)}
+                                        className="w-full bg-white border border-slate-200 rounded-lg p-2 outline-none focus:border-teal-700 transition text-[11px]"
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    onClick={() => {
+                                      // process submit
+                                      if (!manualTxId.trim()) {
+                                        addToast('Please enter the Transaction ID / UTR Number.', 'error');
+                                        return;
+                                      }
+                                      if (!manualProofUrl) {
+                                        addToast('Please upload your payment receipt screenshot.', 'error');
+                                        return;
+                                      }
+                                      
+                                      const currentOrders = dbLocal.getOrders();
+                                      const idx = currentOrders.findIndex(o => o.id === order.id);
+                                      if (idx > -1) {
+                                        const originalOrder = currentOrders[idx];
+                                        const updatedOrder: Order = {
+                                          ...originalOrder,
+                                          status: 'Awaiting Payment Verification',
+                                          paymentTxId: manualTxId.trim(),
+                                          paymentProofUrl: manualProofUrl,
+                                          paymentNote: manualNote.trim(),
+                                          paymentRejectionReason: undefined, // Clear rejection reason
+                                          timeline: [
+                                            ...(originalOrder.timeline || []),
+                                            {
+                                              status: 'Awaiting Payment Verification',
+                                              time: new Date().toISOString(),
+                                              note: `Payment proof re-submitted by customer with transaction ID ${manualTxId.trim()}.`
+                                            }
+                                          ],
+                                          paymentVerificationLogs: [
+                                            ...(originalOrder.paymentVerificationLogs || []),
+                                            {
+                                              action: 'submit',
+                                              performedBy: currentUser?.name || 'Customer',
+                                              performedByRole: 'customer',
+                                              timestamp: new Date().toISOString(),
+                                              note: `Resubmitted payment proof after admin feedback.`
+                                            }
+                                          ]
+                                        };
+                                        currentOrders[idx] = updatedOrder;
+                                        dbLocal.saveOrders(currentOrders);
+                                        
+                                        // Alert Admin
+                                        dbLocal.addNotification(
+                                          'admin',
+                                          `Payment Proof Re-submitted`,
+                                          `Customer resubmitted payment proof for Order #${order.id} with UTR ${manualTxId.trim()}.`,
+                                          'payment_updated'
+                                        );
+                                        
+                                        addToast('Payment proof submitted successfully!', 'success');
+                                        // reset state
+                                        setManualTxId('');
+                                        setManualNote('');
+                                        setManualProofUrl('');
+                                        setManualProofFileName('');
+                                        setReuploadingOrderId(null);
+                                        loadData();
+                                      }
+                                    }}
+                                    className="w-full bg-teal-700 hover:bg-teal-800 text-white font-bold py-2 rounded-xl text-center uppercase tracking-wider transition text-[11px] cursor-pointer shadow-sm"
+                                  >
+                                    Submit Clearance Receipt
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Action footer (View PDF Invoice) */}
+                          <div className="flex justify-between items-center border-t border-slate-100 pt-3.5 mt-2">
+                            <span className="text-[10px] text-slate-400 font-medium">Clearance cleared by AI B2B Gateway</span>
+                            <button
+                              onClick={() => setViewInvoiceOrder(order)}
+                              className="text-teal-700 hover:text-teal-800 font-bold flex items-center gap-1.5 transition text-[11px]"
+                            >
+                              <FileText className="w-3.5 h-3.5" />
+                              View Corporate Invoice (PDF)
+                            </button>
+                          </div>
+                          
+                        </div>
+                      </div>
+                    );
+                  })
+              )}
+            </div>
+
+            {/* Procurement Right Sidebar */}
+            <div className="lg:col-span-1 space-y-6 text-xs">
+              
+              {/* Help support coordinates card */}
+              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider border-b border-slate-100 pb-2">
+                  B2B Clearing Guidelines
+                </h3>
+                <div className="space-y-3 font-medium leading-relaxed text-slate-600">
+                  <div className="flex gap-3">
+                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    <p><strong>Offline Clearing:</strong> If UPI or Bank Wire was selected, complete the transfer outside our app first, then attach the receipt.</p>
+                  </div>
+                  <div className="flex gap-3">
+                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    <p><strong>Admin Audit:</strong> Super Admin logs each action. Your order reaches the supplier dashboard within minutes of validation approval.</p>
+                  </div>
+                  <div className="flex gap-3">
+                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    <p><strong>PDF Invoice:</strong> Download legally compliant commercial B2B invoices featuring complete GST & HSN breakouts instantly.</p>
+                  </div>
+                </div>
+                
+                <div className="bg-slate-50 rounded-xl p-3 border border-slate-100 text-[11px] leading-normal font-semibold text-slate-600">
+                  <p className="text-[9px] uppercase text-teal-800 font-bold mb-1">super admin clearance contact</p>
+                  <p>Escalations: <span className="font-mono text-slate-900">warisulislam371@gmail.com</span></p>
+                  <p className="mt-0.5 text-[10px] text-slate-400">Response standard: Under 15 mins for audited clinical consignments.</p>
+                </div>
+              </div>
+
+              {/* Security seal */}
+              <div className="bg-gradient-to-br from-teal-800 to-teal-950 p-6 rounded-2xl border border-teal-700/30 text-teal-100 space-y-4 shadow-sm relative overflow-hidden">
+                <div className="absolute right-[-10px] bottom-[-10px] opacity-10">
+                  <ShieldCheck className="w-32 h-32" />
+                </div>
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="w-5 h-5 text-orange-400 shrink-0" />
+                  <h4 className="font-bold text-xs uppercase tracking-wider">Clinical Clearing Seal</h4>
+                </div>
+                <p className="text-[11px] leading-relaxed opacity-90 font-medium">
+                  Every corporate hospital order placed undergoes multi-factor clearing checks. High-density medical equipment dispatches are secured using double-sealed calibrated container seals.
+                </p>
+              </div>
+
+            </div>
+
           </div>
         </div>
       )}

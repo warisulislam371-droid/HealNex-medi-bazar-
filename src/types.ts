@@ -61,7 +61,7 @@ export interface Vendor {
   updatedAt?: string;
 }
 
-export type ProductStatus = 'Pending' | 'Approved' | 'Rejected';
+export type ProductStatus = 'Draft' | 'Pending' | 'Approved' | 'Rejected' | 'Inactive';
 
 export interface ProductSpecification {
   key: string;
@@ -91,6 +91,36 @@ export interface Product {
   brochureUrl?: string;
   status: ProductStatus;
   createdAt: string;
+  
+  // Extended Vendor Product Fields
+  shortDescription?: string;
+  fullDescription?: string;
+  tags?: string[];
+  mrp?: number;
+  wholesalePrice?: number;
+  discountPercentage?: number;
+  unit?: string; // Piece, Box, Pack, etc.
+  videoUrl?: string;
+  manufacturer?: string;
+  modelNumber?: string;
+  certifications?: string[];
+  packageContents?: string;
+  lowStockAlert?: number;
+  outOfStock?: boolean;
+  weight?: number; // Weight in kg
+  dimensions?: {
+    length: number;
+    width: number;
+    height: number;
+  };
+  shippingCharges?: number;
+  estimatedDeliveryTime?: string;
+  rejectionReason?: string;
+  performance?: {
+    views: number;
+    inquiries: number;
+    sales: number;
+  };
 }
 
 export interface Category {
@@ -100,7 +130,22 @@ export interface Category {
   subcategories: string[];
 }
 
-export type OrderStatus = 'Pending' | 'Confirmed' | 'Processing' | 'Shipped' | 'Delivered' | 'Returned' | 'Cancelled';
+export type OrderStatus = 
+  | 'Pending' 
+  | 'Confirmed' 
+  | 'Processing' 
+  | 'Shipped' 
+  | 'Delivered' 
+  | 'Returned' 
+  | 'Cancelled'
+  | 'Pending Payment'
+  | 'Payment Submitted'
+  | 'Awaiting Payment Verification'
+  | 'Payment Verified'
+  | 'Order Sent to Vendor'
+  | 'Vendor Accepted'
+  | 'Completed'
+  | 'Refunded';
 
 export interface OrderItem {
   productId: string;
@@ -118,6 +163,35 @@ export interface OrderTimelineEvent {
   status: OrderStatus;
   time: string;
   note: string;
+}
+
+export interface PaymentVerificationLog {
+  action: 'submit' | 'approve' | 'reject' | 'request_reupload';
+  performedBy: string;
+  performedByRole: string;
+  timestamp: string;
+  note?: string;
+}
+
+export interface PaymentSettings {
+  id: string; // 'global_payment_settings'
+  razorpayEnabled: boolean;
+  razorpayKeyId: string;
+  razorpaySecret: string;
+  razorpayMode: 'test' | 'live';
+  
+  upiEnabled: boolean;
+  upiId: string;
+  upiHolderName: string;
+  upiQrCodeUrl?: string;
+  
+  bankEnabled: boolean;
+  bankHolderName: string;
+  bankName: string;
+  bankAccountNumber: string;
+  bankIfsc: string;
+  bankBranch: string;
+  bankQrCodeUrl?: string;
 }
 
 export interface Order {
@@ -146,6 +220,12 @@ export interface Order {
   invoiceUrl?: string;
   timeline: OrderTimelineEvent[];
   createdAt: string;
+  // Manual Payment Fields
+  paymentProofUrl?: string;
+  paymentTxId?: string; // Transaction ID or UTR Number
+  paymentNote?: string;
+  paymentRejectionReason?: string;
+  paymentVerificationLogs?: PaymentVerificationLog[];
 }
 
 export interface RFQ {
@@ -222,7 +302,7 @@ export interface Notification {
   title: string;
   message: string;
   read: boolean;
-  type: 'vendor_registered' | 'vendor_approved' | 'product_submitted' | 'product_approved' | 'rfq_created' | 'rfq_received' | 'quote_received' | 'order_placed' | 'order_shipped' | 'order_delivered';
+  type: string;
   createdAt: string;
 }
 
@@ -242,3 +322,27 @@ export interface WishlistItem {
   customerId: string;
   createdAt: string;
 }
+
+export interface WhatsAppSettings {
+  id: string; // 'global_whatsapp_settings'
+  enabled: boolean;
+  phoneNumber: string;
+  businessLink?: string;
+  defaultMessage: string;
+  position: 'floating' | 'contact_page';
+  buttonText: string;
+  iconUrl?: string;
+  showOnAllScreens: boolean;
+  selectedScreens: string[]; // ['Home', 'ProductDetails', 'Cart', 'Checkout', 'Orders', 'Profile', 'HelpSupport']
+}
+
+export interface WhatsAppClickLog {
+  id: string;
+  timestamp: string;
+  customerId?: string;
+  customerName?: string;
+  contextPage: string;
+  orderNumber?: string;
+  productName?: string;
+}
+

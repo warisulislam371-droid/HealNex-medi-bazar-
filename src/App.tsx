@@ -8,6 +8,7 @@ import VendorPanel from './components/VendorPanel';
 import SupportChat from './components/SupportChat';
 import BlogSection from './components/BlogSection';
 import AuthModal from './components/AuthModal';
+import WhatsAppWidget from './components/WhatsAppWidget';
 import { LogIn, User as UserIcon, Store, KeyRound, ArrowRight } from 'lucide-react';
 
 export default function App() {
@@ -217,6 +218,19 @@ export default function App() {
             RFQ Procurement
           </button>
 
+          {/* My Orders for Customer */}
+          {currentUser && currentUser.role === 'customer' && (
+            <button 
+              onClick={() => setCurrentView('orders')}
+              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-xs font-semibold transition-colors text-left ${
+                currentView === 'orders' ? 'bg-teal-800 text-white shadow-md' : 'hover:bg-teal-800/55 text-teal-100'
+              }`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${currentView === 'orders' ? 'bg-orange-400 animate-pulse' : 'bg-transparent'}`}></span>
+              My Orders
+            </button>
+          )}
+
           <div className="text-[10px] text-teal-300 font-bold uppercase tracking-wider px-3 mt-6 mb-2.5">Operations</div>
 
           {/* Shopping Cart */}
@@ -330,7 +344,7 @@ export default function App() {
         <main className="flex-grow overflow-y-auto">
           
           {/* Marketplace (Customer Dashboard) */}
-          {(currentView === 'marketplace' || currentView === 'cart' || currentView === 'rfqs') && (
+          {(currentView === 'marketplace' || currentView === 'cart' || currentView === 'rfqs' || currentView === 'orders') && (
             <CustomerPanel
               currentUser={currentUser}
               onNavigate={setCurrentView}
@@ -426,6 +440,9 @@ export default function App() {
           </div>
         ))}
       </div>
+
+      {/* Global Admin-Managed WhatsApp Support Widget */}
+      <WhatsAppWidget currentUser={currentUser} currentView={currentView} />
 
     </div>
   );

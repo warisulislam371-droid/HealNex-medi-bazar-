@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { dbLocal } from '../db';
-import { Vendor, Product, SupportTicket, Order, User, Notification } from '../types';
+import { Vendor, Product, SupportTicket, Order, User, Notification, PaymentSettings, WhatsAppSettings, WhatsAppClickLog } from '../types';
 import {
   TrendingUp,
   Users,
@@ -13,6 +13,7 @@ import {
   Shield,
   Search,
   MessageSquare,
+  MessageCircle,
   Activity,
   Award,
   BookOpen,
@@ -32,7 +33,11 @@ import {
   Calendar,
   MapPin,
   ExternalLink,
-  Mail
+  Mail,
+  QrCode,
+  Building,
+  Copy,
+  ClipboardList
 } from 'lucide-react';
 
 // Global helper for generating a beautiful high-fidelity scanned document preview
@@ -183,7 +188,18 @@ export default function AdminPanel({ currentUser, addToast }: AdminPanelProps) {
   const [pushTarget, setPushTarget] = useState('admin');
   const [pushType, setPushType] = useState('clinical_broadcast');
   
-  const [activeTab, setActiveTab] = useState<'kpis' | 'vendors' | 'products' | 'tickets' | 'audit'>('kpis');
+  const [activeTab, setActiveTab] = useState<'kpis' | 'vendors' | 'products' | 'tickets' | 'audit' | 'payment-settings' | 'verify-payments' | 'whatsapp-support'>('kpis');
+  
+  // Payment Verification admin states
+  const [paymentSettings, setPaymentSettings] = useState<PaymentSettings>(dbLocal.getPaymentSettings());
+  const [upiQrCode, setUpiQrCode] = useState<string>('');
+  const [bankQrCode, setBankQrCode] = useState<string>('');
+  const [rejectingOrderId, setRejectingOrderId] = useState<string | null>(null);
+  const [rejectionReasonText, setRejectionReasonText] = useState<string>('');
+  
+  // WhatsApp Support admin states
+  const [whatsappSettings, setWhatsappSettings] = useState<WhatsAppSettings>(dbLocal.getWhatsAppSettings());
+  const [whatsappLogs, setWhatsappLogs] = useState<WhatsAppClickLog[]>(dbLocal.getWhatsAppClickLogs());
   
   // States for document modal reviews
   const [selectedVendorDoc, setSelectedVendorDoc] = useState<Vendor | null>(null);
@@ -203,6 +219,9 @@ export default function AdminPanel({ currentUser, addToast }: AdminPanelProps) {
     setTickets(dbLocal.getTickets());
     setOrders(dbLocal.getOrders());
     setNotifs(dbLocal.getNotifications());
+    setPaymentSettings(dbLocal.getPaymentSettings());
+    setWhatsappSettings(dbLocal.getWhatsAppSettings());
+    setWhatsappLogs(dbLocal.getWhatsAppClickLogs());
   };
 
   useEffect(() => {
@@ -211,12 +230,147 @@ export default function AdminPanel({ currentUser, addToast }: AdminPanelProps) {
     return () => clearInterval(interval);
   }, []);
 
+  const handleSavePaymentSettings = (e: React.FormEvent) => {
+    e.preventDefault();
+    const updatedSettings = {
+      ...paymentSettings,
+      upiQrCodeUrl: upiQrCode || paymentSettings.upiQrCodeUrl,
+      bankQrCodeUrl: bankQrCode || paymentSettings.bankQrCodeUrl
+    };
+    dbLocal.savePaymentSettings(updatedSettings);
+    setPaymentSettings(updatedSettings);
+    addToast('Global Payment Settings synchronized successfully!', 'success');
+  };
+
+  const handleUpiQrUpload = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      if (e.target?.result) {
+        setUpiQrCode(e.target.result as string);
+        addToast('UPI QR Code uploaded successfully!', 'success');
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleBankQrUpload = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      if (e.target?.result) {
+        setBankQrCode(e.target.result as string);
+        addToast('Bank Transfer QR Code uploaded successfully!', 'success');
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleVerifyPayment = (orderId: string) => {
+    const currentOrders = dbLocal.getOrders();
+    const idx = currentOrders.findIndex(o => o.id === orderId);
+    if (idx > -1) {
+      const originalOrder = currentOrders[idx];
+      const updatedOrder: Order = {
+        ...originalOrder,
+        status: 'Order Sent to Vendor',
+        timeline: [
+          ...(originalOrder.timeline || []),
+          {
+            status: 'Order Sent to Vendor',
+            time: new Date().toISOString(),
+            note: `Payment verified by administrator ${currentUser?.name || 'Admin'}. Sent to vendor dashboard.`
+          }
+        ],
+        paymentVerificationLogs: [
+          ...(originalOrder.paymentVerificationLogs || []),
+          {
+            action: 'approve',
+            performedBy: currentUser?.name || 'Administrator',
+            performedByRole: 'admin',
+            timestamp: new Date().toISOString(),
+            note: `Validated transaction and cleared receipt.`
+          }
+        ]
+      };
+      currentOrders[idx] = updatedOrder;
+      dbLocal.saveOrders(currentOrders);
+      
+      // Notify Customer & Vendor
+      dbLocal.addNotification(
+        originalOrder.customerId,
+        `Payment Verified`,
+        `Your payment receipt for Order #${orderId} was successfully validated. Procurement sent to supplier for delivery.`,
+        'payment_approved'
+      );
+      dbLocal.addNotification(
+        originalOrder.vendorId,
+        `New Order Assigned`,
+        `New verified procurement Order #${orderId} (₹${originalOrder.finalAmount.toLocaleString('en-IN')}) received from administrative desk.`,
+        'order_assigned'
+      );
+      
+      addToast(`Cleared and routed Order #${orderId} to the supplier dashboard!`, 'success');
+      loadData();
+    }
+  };
+
+  const handleRejectPayment = (orderId: string) => {
+    if (!rejectionReasonText.trim()) {
+      addToast('Please enter a specific rejection reason.', 'error');
+      return;
+    }
+    
+    const currentOrders = dbLocal.getOrders();
+    const idx = currentOrders.findIndex(o => o.id === orderId);
+    if (idx > -1) {
+      const originalOrder = currentOrders[idx];
+      const updatedOrder: Order = {
+        ...originalOrder,
+        status: 'Pending Payment',
+        paymentRejectionReason: rejectionReasonText.trim(),
+        timeline: [
+          ...(originalOrder.timeline || []),
+          {
+            status: 'Pending Payment',
+            time: new Date().toISOString(),
+            note: `Payment rejected by administrator: ${rejectionReasonText.trim()}`
+          }
+        ],
+        paymentVerificationLogs: [
+          ...(originalOrder.paymentVerificationLogs || []),
+          {
+            action: 'reject',
+            performedBy: currentUser?.name || 'Administrator',
+            performedByRole: 'admin',
+            timestamp: new Date().toISOString(),
+            note: `Rejected payment receipt. Reason: ${rejectionReasonText.trim()}`
+          }
+        ]
+      };
+      currentOrders[idx] = updatedOrder;
+      dbLocal.saveOrders(currentOrders);
+      
+      // Notify Customer
+      dbLocal.addNotification(
+        originalOrder.customerId,
+        `Payment Receipt Rejected`,
+        `Verification failed for Order #${orderId} payment proof. Reason: "${rejectionReasonText.trim()}"`,
+        'payment_rejected'
+      );
+      
+      addToast(`Rejected payment receipt for Order #${orderId}. Notification dispatched.`, 'info');
+      setRejectingOrderId(null);
+      setRejectionReasonText('');
+      loadData();
+    }
+  };
+
   // Calculations
   const totalRevenue = orders.reduce((sum, o) => sum + o.finalAmount, 0);
   const pendingVendorsCount = vendors.filter(v => v.status === 'Pending').length;
   const pendingProductsCount = products.filter(p => p.status === 'Pending').length;
   const activeRfqsCount = dbLocal.getRfqs().filter(r => r.status === 'Open').length;
   const openTicketsCount = tickets.filter(t => t.status !== 'Closed').length;
+  const pendingPaymentsCount = orders.filter(o => o.status === 'Awaiting Payment Verification').length;
 
   // Actions
   const handleVendorStatus = (
@@ -389,6 +543,27 @@ export default function AdminPanel({ currentUser, addToast }: AdminPanelProps) {
             {openTicketsCount > 0 && (
               <span className="bg-sky-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">{openTicketsCount}</span>
             )}
+          </button>
+          <button
+            onClick={() => setActiveTab('verify-payments')}
+            className={`px-4 py-2 rounded-lg transition flex items-center gap-1.5 ${activeTab === 'verify-payments' ? 'bg-white text-slate-900 shadow-sm font-bold' : 'text-slate-600 hover:bg-slate-50'}`}
+          >
+            Verify Payments
+            {pendingPaymentsCount > 0 && (
+              <span className="bg-teal-700 text-white text-[9px] font-bold px-1.5 py-0.5 rounded-full">{pendingPaymentsCount}</span>
+            )}
+          </button>
+          <button
+            onClick={() => setActiveTab('payment-settings')}
+            className={`px-4 py-2 rounded-lg transition flex items-center gap-1.5 ${activeTab === 'payment-settings' ? 'bg-white text-slate-900 shadow-sm font-bold' : 'text-slate-600 hover:bg-slate-50'}`}
+          >
+            Payment Settings
+          </button>
+          <button
+            onClick={() => setActiveTab('whatsapp-support')}
+            className={`px-4 py-2 rounded-lg transition flex items-center gap-1.5 ${activeTab === 'whatsapp-support' ? 'bg-white text-slate-900 shadow-sm font-bold' : 'text-slate-600 hover:bg-slate-50'}`}
+          >
+            WhatsApp Settings
           </button>
         </div>
       </div>
@@ -827,6 +1002,815 @@ export default function AdminPanel({ currentUser, addToast }: AdminPanelProps) {
           </div>
         </div>
       )}
+
+      {/* Admin B2B Payment Clearance Verification Panel */}
+      {activeTab === 'verify-payments' && (
+        <div className="space-y-6 animate-fade-in pb-12">
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+            <h2 className="text-base font-bold text-slate-900 uppercase tracking-wide flex items-center gap-2">
+              <ClipboardList className="w-5 h-5 text-teal-700" />
+              Manual Payment Clearance Audit Desk
+            </h2>
+            <p className="text-xs text-slate-500 mt-1">Audit offline UPI screenshots and Bank transfers before dispatching clearance certificates to vendors.</p>
+          </div>
+
+          {orders.filter(o => o.status === 'Awaiting Payment Verification').length === 0 ? (
+            <div className="bg-white p-12 rounded-2xl border border-slate-200 shadow-sm text-center space-y-4 max-w-xl mx-auto">
+              <CheckCircle className="w-12 h-12 text-emerald-500 mx-auto" />
+              <div>
+                <h4 className="text-sm font-bold text-slate-700 uppercase tracking-wide">All Payments Audited</h4>
+                <p className="text-xs text-slate-400 mt-1">There are no pending manual payment receipts awaiting administrative clearance.</p>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 gap-6">
+              {orders
+                .filter(o => o.status === 'Awaiting Payment Verification')
+                .map((order) => {
+                  const isRejecting = rejectingOrderId === order.id;
+
+                  return (
+                    <div key={order.id} className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden grid grid-cols-1 lg:grid-cols-3">
+                      
+                      {/* Left Column: Order details */}
+                      <div className="p-6 lg:col-span-2 space-y-4 border-r border-slate-100">
+                        <div className="flex justify-between items-center pb-3 border-b border-slate-100">
+                          <div>
+                            <span className="text-[10px] bg-teal-50 text-teal-800 border border-teal-200 font-mono font-bold px-2 py-0.5 rounded">
+                              Order #{order.id}
+                            </span>
+                            <span className="text-[11px] text-slate-400 ml-2 font-medium">
+                              Logged: {new Date(order.createdAt).toLocaleString()}
+                            </span>
+                          </div>
+                          <span className="bg-amber-100 text-amber-800 border border-amber-200 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider animate-pulse">
+                            {order.status}
+                          </span>
+                        </div>
+
+                        {/* Customer detail */}
+                        <div className="grid grid-cols-2 gap-4 text-xs bg-slate-50 p-3 rounded-xl border border-slate-100">
+                          <div>
+                            <p className="text-slate-400 text-[10px] uppercase font-bold">Procurement Customer</p>
+                            <p className="text-slate-800 font-bold mt-0.5">{order.shippingAddress.address || 'Hospital Authority'}</p>
+                            <p className="text-slate-500 text-[10px]">{order.shippingAddress.city}, {order.shippingAddress.state}</p>
+                          </div>
+                          <div>
+                            <p className="text-slate-400 text-[10px] uppercase font-bold">Payment Method</p>
+                            <p className="text-slate-800 font-bold mt-0.5">{order.paymentMethod}</p>
+                            <p className="text-teal-700 font-mono font-bold">Amount: ₹{order.finalAmount.toLocaleString('en-IN')}</p>
+                          </div>
+                        </div>
+
+                        {/* Line items details */}
+                        <div className="space-y-2">
+                          <p className="text-[9px] text-slate-400 uppercase font-bold tracking-wider">Procured Line Items</p>
+                          <div className="divide-y divide-slate-100 border border-slate-100 rounded-xl px-3 py-1 bg-white">
+                            {order.items.map((item, index) => (
+                              <div key={index} className="py-2 flex justify-between text-xs">
+                                <span className="text-slate-700 font-bold max-w-[70%] truncate">{item.productName} (x{item.quantity})</span>
+                                <span className="text-slate-500 font-mono">₹{(item.price * item.quantity).toLocaleString()}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Transaction Receipt coordinates reported */}
+                        <div className="space-y-2">
+                          <p className="text-[9px] text-slate-400 uppercase font-bold tracking-wider">Transaction receipt metadata</p>
+                          <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-100 text-xs space-y-1.5 font-medium text-slate-600">
+                            <p className="font-mono">UTR / Transaction ID: <strong className="text-slate-900 font-bold select-all bg-white border px-1.5 py-0.5 rounded">{order.paymentTxId || 'NOT REPORTED'}</strong></p>
+                            {order.paymentNote && <p>Customer Reference Note: <span className="italic text-slate-800">"{order.paymentNote}"</span></p>}
+                          </div>
+                        </div>
+
+                        {/* Audit Actions */}
+                        <div className="pt-4 border-t border-slate-100 flex flex-wrap gap-3">
+                          {!isRejecting ? (
+                            <>
+                              <button
+                                onClick={() => {
+                                  if (window.confirm(`Clear payment verification for Order #${order.id} and route to vendor?`)) {
+                                    handleVerifyPayment(order.id);
+                                  }
+                                }}
+                                className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-5 py-2.5 rounded-xl uppercase tracking-wider flex items-center gap-1.5 cursor-pointer shadow-sm transition"
+                              >
+                                <CheckCircle className="w-4 h-4" />
+                                Approve & Route to Vendor
+                              </button>
+                              <button
+                                onClick={() => setRejectingOrderId(order.id)}
+                                className="bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold px-4 py-2.5 rounded-xl uppercase tracking-wider flex items-center gap-1.5 cursor-pointer transition"
+                              >
+                                <XCircle className="w-4 h-4" />
+                                Reject Receipt Proof
+                              </button>
+                            </>
+                          ) : (
+                            <div className="w-full bg-rose-50/50 p-4 rounded-xl border border-rose-200 space-y-3">
+                              <h5 className="text-rose-900 font-bold text-[11px] uppercase tracking-wider">Reject Payment Clearance</h5>
+                              <div>
+                                <label className="text-slate-500 block mb-1 text-[10px] font-bold">Specify Rejection Reason (sent to customer) *</label>
+                                <input
+                                  type="text"
+                                  placeholder="e.g. Transaction ID does not match, screenshot blurred, amount mismatch..."
+                                  value={rejectionReasonText}
+                                  onChange={(e) => setRejectionReasonText(e.target.value)}
+                                  className="w-full bg-white border border-slate-200 rounded-lg p-2 text-xs outline-none focus:border-rose-600 transition"
+                                />
+                              </div>
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => handleRejectPayment(order.id)}
+                                  className="bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs px-4 py-1.5 rounded-lg uppercase transition"
+                                >
+                                  Confirm Rejection
+                                </button>
+                                <button
+                                  onClick={() => { setRejectingOrderId(null); setRejectionReasonText(''); }}
+                                  className="bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 font-semibold text-xs px-3 py-1.5 rounded-lg transition"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Right Column: Payment Proof Receipt Visual */}
+                      <div className="p-6 bg-slate-50/80 flex flex-col justify-between items-center text-center">
+                        <div className="w-full space-y-2">
+                          <p className="text-[10px] text-slate-400 uppercase font-bold tracking-wider text-left">Uploaded Payment Proof</p>
+                          
+                          {order.paymentProofUrl ? (
+                            <div className="space-y-3">
+                              {/* Document frame */}
+                              <div className="bg-white p-2 rounded-xl border border-slate-200 shadow-sm relative group overflow-hidden">
+                                <img
+                                  src={order.paymentProofUrl}
+                                  alt="Customer Payment Receipt"
+                                  className="w-full h-48 object-contain rounded"
+                                  referrerPolicy="no-referrer"
+                                />
+                                <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition flex items-center justify-center">
+                                  <a
+                                    href={order.paymentProofUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="bg-white text-slate-800 text-[10px] font-bold px-3 py-1.5 rounded-lg shadow flex items-center gap-1 hover:bg-slate-100"
+                                  >
+                                    <ExternalLink className="w-3.5 h-3.5" />
+                                    View Full Document
+                                  </a>
+                                </div>
+                              </div>
+                              <p className="text-[10px] text-slate-400 truncate max-w-[200px] mx-auto font-mono">receipt_screenshot.png</p>
+                            </div>
+                          ) : (
+                            <div className="border border-dashed border-slate-300 rounded-xl p-8 bg-slate-100 text-slate-400 flex flex-col items-center justify-center space-y-2">
+                              <AlertCircle className="w-8 h-8 text-slate-300" />
+                              <p className="text-[11px] font-semibold">No Receipt Uploaded</p>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="w-full border-t border-slate-200/60 pt-4 mt-4 text-[10px] text-slate-400 font-medium">
+                          Audit logs logged under super admin key.
+                        </div>
+                      </div>
+
+                    </div>
+                  );
+                })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Admin Payment Settings Tab */}
+      {activeTab === 'payment-settings' && (
+        <div className="space-y-6 animate-fade-in pb-12">
+          
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+            <h2 className="text-base font-bold text-slate-900 uppercase tracking-wide flex items-center gap-2">
+              <CreditCard className="w-5 h-5 text-teal-700" />
+              Global Procurement Payment Settings Manager
+            </h2>
+            <p className="text-xs text-slate-500 mt-1">Configure enabled online payment gateways and manual B2B clearing coordinates for clinical hospital buyers.</p>
+          </div>
+
+          <form onSubmit={handleSavePaymentSettings} className="space-y-6 max-w-4xl">
+            
+            {/* Razorpay Setup card */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden text-xs">
+              <div className="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                  <CreditCard className="w-4 h-4 text-teal-700" />
+                  Razorpay API Gateway Credentials
+                </h3>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-semibold text-slate-500">Enabled</span>
+                  <input
+                    type="checkbox"
+                    checked={paymentSettings.razorpayEnabled}
+                    onChange={(e) => setPaymentSettings({ ...paymentSettings, razorpayEnabled: e.target.checked })}
+                    className="w-4 h-4 accent-teal-600 rounded cursor-pointer"
+                  />
+                </div>
+              </div>
+              <div className="p-6 space-y-4 font-medium text-slate-600">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-slate-500 block mb-1 font-bold">Razorpay Key ID *</label>
+                    <input
+                      type="text"
+                      placeholder="rzp_test_..."
+                      value={paymentSettings.razorpayKeyId}
+                      onChange={(e) => setPaymentSettings({ ...paymentSettings, razorpayKeyId: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-teal-700 transition font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-slate-500 block mb-1 font-bold">Razorpay Secret Key *</label>
+                    <input
+                      type="password"
+                      placeholder="••••••••••••••••••••••••"
+                      value={paymentSettings.razorpaySecret}
+                      onChange={(e) => setPaymentSettings({ ...paymentSettings, razorpaySecret: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-teal-700 transition"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-slate-500 block mb-1.5 font-bold">Operation Mode</label>
+                  <div className="flex gap-4">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="razorpayMode"
+                        checked={paymentSettings.razorpayMode === 'test'}
+                        onChange={() => setPaymentSettings({ ...paymentSettings, razorpayMode: 'test' })}
+                        className="accent-teal-600"
+                      />
+                      <span>Test / Sandbox Mode</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="razorpayMode"
+                        checked={paymentSettings.razorpayMode === 'live'}
+                        onChange={() => setPaymentSettings({ ...paymentSettings, razorpayMode: 'live' })}
+                        className="accent-teal-600"
+                      />
+                      <span>Live Production Mode</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* UPI Settings Card */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden text-xs">
+              <div className="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                  <QrCode className="w-4 h-4 text-teal-700" />
+                  UPI Payment Channel coordinates
+                </h3>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-semibold text-slate-500">Enabled</span>
+                  <input
+                    type="checkbox"
+                    checked={paymentSettings.upiEnabled}
+                    onChange={(e) => setPaymentSettings({ ...paymentSettings, upiEnabled: e.target.checked })}
+                    className="w-4 h-4 accent-teal-600 rounded cursor-pointer"
+                  />
+                </div>
+              </div>
+              <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-6 font-medium text-slate-600">
+                <div className="md:col-span-2 space-y-4">
+                  <div>
+                    <label className="text-slate-500 block mb-1 font-bold">UPI ID (VPA Address) *</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. corporate@okaxis"
+                      value={paymentSettings.upiId}
+                      onChange={(e) => setPaymentSettings({ ...paymentSettings, upiId: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-teal-700 transition font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-slate-500 block mb-1 font-bold">UPI Account Holder Name *</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. HealNex Private Limited"
+                      value={paymentSettings.upiHolderName}
+                      onChange={(e) => setPaymentSettings({ ...paymentSettings, upiHolderName: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-teal-700 transition"
+                    />
+                  </div>
+                </div>
+                <div className="md:col-span-1 space-y-2">
+                  <label className="text-slate-500 block font-bold">UPI QR Code Image</label>
+                  <div className="border border-dashed border-slate-300 rounded-xl p-4 bg-slate-50 text-center space-y-2 flex flex-col items-center justify-center">
+                    {(upiQrCode || paymentSettings.upiQrCodeUrl) ? (
+                      <div className="space-y-1.5">
+                        <img
+                          src={upiQrCode || paymentSettings.upiQrCodeUrl}
+                          alt="UPI QR Code"
+                          className="w-24 h-24 object-contain mx-auto rounded border bg-white"
+                          referrerPolicy="no-referrer"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => { setUpiQrCode(''); setPaymentSettings({ ...paymentSettings, upiQrCodeUrl: '' }); }}
+                          className="text-[10px] text-red-500 hover:underline"
+                        >
+                          Clear Image
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <QrCode className="w-8 h-8 text-slate-300 mx-auto" />
+                        <input
+                          type="file"
+                          accept="image/*"
+                          id="upi-qr-input"
+                          className="hidden"
+                          onChange={(e) => e.target.files?.[0] && handleUpiQrUpload(e.target.files[0])}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => document.getElementById('upi-qr-input')?.click()}
+                          className="text-[10px] text-teal-700 hover:underline font-bold"
+                        >
+                          Upload UPI QR
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Bank Transfer Settings Card */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden text-xs">
+              <div className="p-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                  <Building className="w-4 h-4 text-teal-700" />
+                  Bank Wire Clearing coordinates
+                </h3>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-semibold text-slate-500">Enabled</span>
+                  <input
+                    type="checkbox"
+                    checked={paymentSettings.bankEnabled}
+                    onChange={(e) => setPaymentSettings({ ...paymentSettings, bankEnabled: e.target.checked })}
+                    className="w-4 h-4 accent-teal-600 rounded cursor-pointer"
+                  />
+                </div>
+              </div>
+              <div className="p-6 grid grid-cols-1 md:grid-cols-3 gap-6 font-medium text-slate-600">
+                <div className="md:col-span-2 space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-slate-500 block mb-1 font-bold">Account Holder Name *</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. HealNex Private Limited"
+                        value={paymentSettings.bankHolderName}
+                        onChange={(e) => setPaymentSettings({ ...paymentSettings, bankHolderName: e.target.value })}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-teal-700 transition"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-slate-500 block mb-1 font-bold">Bank Name *</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. HDFC Bank"
+                        value={paymentSettings.bankName}
+                        onChange={(e) => setPaymentSettings({ ...paymentSettings, bankName: e.target.value })}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-teal-700 transition"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div className="sm:col-span-2">
+                      <label className="text-slate-500 block mb-1 font-bold">Account Number *</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. 50100492817283"
+                        value={paymentSettings.bankAccountNumber}
+                        onChange={(e) => setPaymentSettings({ ...paymentSettings, bankAccountNumber: e.target.value })}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-teal-700 transition font-mono"
+                      />
+                    </div>
+                    <div className="sm:col-span-1">
+                      <label className="text-slate-500 block mb-1 font-bold">IFSC Code *</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. HDFC0001234"
+                        value={paymentSettings.bankIfsc}
+                        onChange={(e) => setPaymentSettings({ ...paymentSettings, bankIfsc: e.target.value })}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-teal-700 transition font-mono uppercase"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-slate-500 block mb-1 font-bold">Branch Name *</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. KG Marg, Connaught Place, New Delhi"
+                      value={paymentSettings.bankBranch}
+                      onChange={(e) => setPaymentSettings({ ...paymentSettings, bankBranch: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="md:col-span-1 space-y-2">
+                  <label className="text-slate-500 block font-bold">Optional Banking QR Code</label>
+                  <div className="border border-dashed border-slate-300 rounded-xl p-4 bg-slate-50 text-center space-y-2 flex flex-col items-center justify-center">
+                    {(bankQrCode || paymentSettings.bankQrCodeUrl) ? (
+                      <div className="space-y-1.5">
+                        <img
+                          src={bankQrCode || paymentSettings.bankQrCodeUrl}
+                          alt="Bank QR Code"
+                          className="w-24 h-24 object-contain mx-auto rounded border bg-white"
+                          referrerPolicy="no-referrer"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => { setBankQrCode(''); setPaymentSettings({ ...paymentSettings, bankQrCodeUrl: '' }); }}
+                          className="text-[10px] text-red-500 hover:underline"
+                        >
+                          Clear Image
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <QrCode className="w-8 h-8 text-slate-300 mx-auto" />
+                        <input
+                          type="file"
+                          accept="image/*"
+                          id="bank-qr-input"
+                          className="hidden"
+                          onChange={(e) => e.target.files?.[0] && handleBankQrUpload(e.target.files[0])}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => document.getElementById('bank-qr-input')?.click()}
+                          className="text-[10px] text-teal-700 hover:underline font-bold"
+                        >
+                          Upload Bank QR
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Save Button */}
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                className="bg-teal-700 hover:bg-teal-800 text-white font-bold py-3 px-8 rounded-xl uppercase tracking-wider text-[11px] shadow-lg cursor-pointer transition flex items-center gap-2"
+              >
+                <CheckCircle className="w-4.5 h-4.5" />
+                Synchronize Payment Rules
+              </button>
+            </div>
+
+          </form>
+        </div>
+      )}
+
+      {/* Admin WhatsApp Support Settings Tab */}
+      {activeTab === 'whatsapp-support' && (
+        <div className="space-y-8 animate-fade-in pb-12">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            
+            {/* Main Configurations Form */}
+            <div className="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-6">
+              <div className="border-b border-slate-100 pb-4">
+                <h2 className="text-sm font-bold text-slate-800 uppercase tracking-wider flex items-center gap-2">
+                  <MessageCircle className="w-5 h-5 text-emerald-500" />
+                  WhatsApp support settings
+                </h2>
+                <p className="text-[10px] text-slate-400 mt-1">Configure instantly updated live support channels for clinical customers.</p>
+              </div>
+
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                dbLocal.saveWhatsAppSettings(whatsappSettings);
+                addToast('WhatsApp support configurations synchronized successfully!', 'success');
+              }} className="space-y-6">
+                
+                {/* Enable / Disable Section */}
+                <div className="flex items-center justify-between p-4 bg-slate-50 rounded-xl border border-slate-150">
+                  <div>
+                    <span className="text-xs font-bold text-slate-800 block">Enable WhatsApp Support Feature</span>
+                    <span className="text-[10px] text-slate-400">Instantly toggle the floating WhatsApp support button for all customers.</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={whatsappSettings.enabled}
+                    onChange={(e) => setWhatsappSettings({ ...whatsappSettings, enabled: e.target.checked })}
+                    className="w-5 h-5 accent-emerald-500 rounded cursor-pointer"
+                  />
+                </div>
+
+                {/* Grid Inputs */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs font-medium text-slate-600">
+                  <div>
+                    <label className="text-slate-500 block mb-1 font-bold">WhatsApp Support Number *</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. +919876543210 (with country code)"
+                      value={whatsappSettings.phoneNumber}
+                      onChange={(e) => setWhatsappSettings({ ...whatsappSettings, phoneNumber: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-emerald-500 transition font-mono"
+                      required
+                    />
+                    <p className="text-[9px] text-slate-400 mt-1">Include country code without special characters or spaces.</p>
+                  </div>
+
+                  <div>
+                    <label className="text-slate-500 block mb-1 font-bold">Button CTA Text *</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Chat on WhatsApp"
+                      value={whatsappSettings.buttonText}
+                      onChange={(e) => setWhatsappSettings({ ...whatsappSettings, buttonText: e.target.value })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-emerald-500 transition font-bold"
+                      required
+                    />
+                    <p className="text-[9px] text-slate-400 mt-1">Aesthetic button caption displayed to visitors.</p>
+                  </div>
+                </div>
+
+                <div className="text-xs font-medium text-slate-600">
+                  <label className="text-slate-500 block mb-1 font-bold">WhatsApp Business Custom Link (Optional)</label>
+                  <input
+                    type="url"
+                    placeholder="e.g. https://wa.me/message/YOUR_BUSINESS_ID"
+                    value={whatsappSettings.businessLink || ''}
+                    onChange={(e) => setWhatsappSettings({ ...whatsappSettings, businessLink: e.target.value })}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-emerald-500 transition font-mono"
+                  />
+                  <p className="text-[9px] text-slate-400 mt-1">Overrides default phone link. Leave blank to auto-generate using standard universal URL.</p>
+                </div>
+
+                {/* Default Welcome Message Template */}
+                <div className="text-xs font-medium text-slate-600 space-y-2">
+                  <div className="flex justify-between items-center">
+                    <label className="text-slate-500 block font-bold">Default Welcome Message Template *</label>
+                    <span className="text-[9px] bg-emerald-50 text-emerald-700 font-bold px-2 py-0.5 rounded font-mono">Dynamic Placeholders Active</span>
+                  </div>
+                  <textarea
+                    rows={4}
+                    value={whatsappSettings.defaultMessage}
+                    onChange={(e) => setWhatsappSettings({ ...whatsappSettings, defaultMessage: e.target.value })}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-emerald-500 transition font-sans leading-relaxed text-slate-700"
+                    placeholder="Hello support, I need assistance..."
+                    required
+                  />
+                  
+                  {/* Placeholders Legend */}
+                  <div className="bg-slate-50 p-3 rounded-xl border border-slate-150 grid grid-cols-3 gap-2.5 text-center">
+                    <button
+                      type="button"
+                      onClick={() => setWhatsappSettings({ ...whatsappSettings, defaultMessage: whatsappSettings.defaultMessage + ' {CustomerName}' })}
+                      className="p-1.5 bg-white border border-slate-200 rounded-lg text-[10px] text-slate-600 hover:border-emerald-500 hover:text-emerald-700 transition font-bold"
+                      title="Click to insert placeholder"
+                    >
+                      &#123;CustomerName&#125;
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWhatsappSettings({ ...whatsappSettings, defaultMessage: whatsappSettings.defaultMessage + ' {OrderNumber}' })}
+                      className="p-1.5 bg-white border border-slate-200 rounded-lg text-[10px] text-slate-600 hover:border-emerald-500 hover:text-emerald-700 transition font-bold"
+                      title="Click to insert placeholder"
+                    >
+                      &#123;OrderNumber&#125;
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setWhatsappSettings({ ...whatsappSettings, defaultMessage: whatsappSettings.defaultMessage + ' {ProductName}' })}
+                      className="p-1.5 bg-white border border-slate-200 rounded-lg text-[10px] text-slate-600 hover:border-emerald-500 hover:text-emerald-700 transition font-bold"
+                      title="Click to insert placeholder"
+                    >
+                      &#123;ProductName&#125;
+                    </button>
+                  </div>
+                  <p className="text-[9px] text-slate-400">Placeholders will be automatically resolved to real contextual parameters depending on what page the customer initiates the chat from.</p>
+                </div>
+
+                {/* Display Preferences */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs font-medium text-slate-600">
+                  <div>
+                    <label className="text-slate-500 block mb-1 font-bold">Button Visual Layout Position</label>
+                    <select
+                      value={whatsappSettings.position}
+                      onChange={(e) => setWhatsappSettings({ ...whatsappSettings, position: e.target.value as any })}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2.5 outline-none focus:border-emerald-500 transition font-bold text-slate-700"
+                    >
+                      <option value="floating">Floating Support Button (Bottom Right)</option>
+                      <option value="contact_page">Contact Page Cards Only (Non-Floating)</option>
+                    </select>
+                    <p className="text-[9px] text-slate-400 mt-1">Floating mode displays on the outer workspace; Contact mode disables outer overlay.</p>
+                  </div>
+
+                  <div>
+                    <label className="text-slate-500 block mb-1 font-bold">Placement Rules</label>
+                    <div className="flex items-center justify-between p-2 bg-slate-50 rounded-lg border border-slate-200">
+                      <span className="text-[10px] font-bold text-slate-500">Show on All Main Screens</span>
+                      <input
+                        type="checkbox"
+                        checked={whatsappSettings.showOnAllScreens}
+                        onChange={(e) => setWhatsappSettings({ ...whatsappSettings, showOnAllScreens: e.target.checked })}
+                        className="w-4 h-4 accent-emerald-500 cursor-pointer"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Screen Selection Grid (Conditional) */}
+                {!whatsappSettings.showOnAllScreens && (
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2 text-xs font-medium text-slate-600 animate-slide-down">
+                    <label className="text-slate-500 block font-bold mb-1">Target Screens Placement Selection *</label>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {[
+                        { id: 'Home', label: 'Home Page' },
+                        { id: 'ProductDetails', label: 'Product Details' },
+                        { id: 'Cart', label: 'Cart Checkout' },
+                        { id: 'Checkout', label: 'Secure Checkout' },
+                        { id: 'Orders', label: 'My Orders' },
+                        { id: 'Profile', label: 'Profile Desk' },
+                        { id: 'HelpSupport', label: 'Help & Support' }
+                      ].map((screen) => {
+                        const isSelected = whatsappSettings.selectedScreens.includes(screen.id);
+                        return (
+                          <label key={screen.id} className="flex items-center gap-2 bg-white p-2 rounded-lg border border-slate-200 cursor-pointer hover:border-emerald-200 hover:bg-emerald-50/20 select-none">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => {
+                                let list = [...whatsappSettings.selectedScreens];
+                                if (isSelected) {
+                                  list = list.filter(s => s !== screen.id);
+                                } else {
+                                  list.push(screen.id);
+                                }
+                                setWhatsappSettings({ ...whatsappSettings, selectedScreens: list });
+                              }}
+                              className="w-4 h-4 accent-emerald-500 rounded"
+                            />
+                            <span className="text-[10px] font-semibold text-slate-700">{screen.label}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Sync Action */}
+                <div className="flex justify-end pt-2">
+                  <button
+                    type="submit"
+                    className="bg-emerald-500 hover:bg-emerald-600 text-white font-bold py-3 px-8 rounded-xl uppercase tracking-wider text-[11px] shadow-md cursor-pointer transition flex items-center gap-2"
+                  >
+                    <CheckCircle className="w-4.5 h-4.5" />
+                    Synchronize Support Rules
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* Sidebar Analytics Dashboard */}
+            <div className="space-y-6">
+              
+              {/* Performance Indicator Card */}
+              <div className="bg-gradient-to-br from-emerald-600 to-teal-700 p-6 rounded-2xl text-white shadow-md relative overflow-hidden">
+                <div className="absolute right-0 bottom-0 translate-x-4 translate-y-4 opacity-10">
+                  <MessageCircle className="w-44 h-44" />
+                </div>
+                <p className="text-[10px] font-bold uppercase tracking-widest opacity-80">WhatsApp Channels Integration</p>
+                <p className="text-3xl font-extrabold font-mono mt-1">{whatsappLogs.length}</p>
+                <h3 className="text-xs font-semibold mt-1 opacity-90">Total Support Requests Initiated</h3>
+                <div className="mt-4 pt-4 border-t border-white/20 flex justify-between items-center text-[10px] font-medium opacity-85">
+                  <span>Feature Status:</span>
+                  <span className={`px-2 py-0.5 rounded-full font-bold ${whatsappSettings.enabled ? 'bg-emerald-400 text-slate-900' : 'bg-red-400 text-slate-900'}`}>
+                    {whatsappSettings.enabled ? 'ACTIVE' : 'DISABLED'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Dynamic Context breakdown */}
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Inquiries by Page</h3>
+                <div className="space-y-2.5 text-xs font-semibold text-slate-600">
+                  {['Home', 'ProductDetails', 'Cart', 'Checkout', 'Orders', 'HelpSupport'].map((p) => {
+                    const count = whatsappLogs.filter(l => l.contextPage === p).length;
+                    const percent = whatsappLogs.length > 0 ? (count / whatsappLogs.length) * 100 : 0;
+                    return (
+                      <div key={p} className="space-y-1">
+                        <div className="flex justify-between text-[10px]">
+                          <span className="text-slate-700">{p === 'HelpSupport' ? 'Help & Support' : p === 'ProductDetails' ? 'Product Details' : p}</span>
+                          <span className="font-mono text-slate-900">{count} clicks ({percent.toFixed(0)}%)</span>
+                        </div>
+                        <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
+                          <div className="bg-emerald-500 h-full rounded-full transition-all duration-500" style={{ width: `${percent}%` }}></div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          {/* Click logs Audit trail */}
+          <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+            <div className="border-b border-slate-100 pb-4 mb-4 flex justify-between items-center">
+              <div>
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                  <Activity className="w-4.5 h-4.5 text-emerald-500" />
+                  Support click-through analytics logs
+                </h3>
+                <p className="text-[10px] text-slate-400 mt-1">Audit log of customer WhatsApp contact requests with context pages and timestamps.</p>
+              </div>
+              <button
+                onClick={() => {
+                  if (confirm('Are you sure you want to flush WhatsApp click analytics logs?')) {
+                    dbLocal.set('healnex_whatsapp_click_logs', []);
+                    setWhatsappLogs([]);
+                    addToast('Analytics logs successfully cleared.', 'info');
+                  }
+                }}
+                className="text-[10px] text-red-500 font-bold hover:underline flex items-center gap-1 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Flush Logs
+              </button>
+            </div>
+
+            {whatsappLogs.length === 0 ? (
+              <div className="py-12 text-center text-slate-400 text-xs">
+                <MessageCircle className="w-12 h-12 text-slate-200 mx-auto mb-3" />
+                No WhatsApp clicks logged in this session yet.
+              </div>
+            ) : (
+              <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+                <table className="w-full text-xs font-medium text-slate-600 text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-150 text-[10px] text-slate-400 uppercase tracking-wider bg-slate-50/50">
+                      <th className="py-2.5 px-4 font-bold">timestamp</th>
+                      <th className="py-2.5 px-4 font-bold">customer name</th>
+                      <th className="py-2.5 px-4 font-bold">context page</th>
+                      <th className="py-2.5 px-4 font-bold">related product</th>
+                      <th className="py-2.5 px-4 font-bold">related order</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {whatsappLogs.map((log) => (
+                      <tr key={log.id} className="border-b border-slate-100 hover:bg-slate-50/50 font-medium">
+                        <td className="py-2.5 px-4 font-mono text-[10px] text-slate-400">
+                          {new Date(log.timestamp).toLocaleString('en-IN')}
+                        </td>
+                        <td className="py-2.5 px-4 text-slate-950 font-bold">
+                          {log.customerName}
+                        </td>
+                        <td className="py-2.5 px-4">
+                          <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-[9px] font-bold uppercase">
+                            {log.contextPage === 'HelpSupport' ? 'Help & Support' : log.contextPage}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-4 text-slate-900 font-semibold truncate max-w-xs" title={log.productName}>
+                          {log.productName || <span className="text-slate-300">-</span>}
+                        </td>
+                        <td className="py-2.5 px-4 font-mono font-bold text-teal-800">
+                          {log.orderNumber ? `#${log.orderNumber}` : <span className="text-slate-300">-</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Admin actions implementation helper functions */}
+      {(() => {
+        // Quick inline helper function attachment
+        (window as any).handleSavePaymentSettings = handleSavePaymentSettings;
+        return null;
+      })()}
 
       {/* Documents review modal popup */}
       {selectedVendorDoc && (

@@ -1,4 +1,4 @@
-import { User, Vendor, Product, Order, RFQ, Quotation, SupportTicket, Blog, Notification, Review } from './types';
+import { User, Vendor, Product, Order, RFQ, Quotation, SupportTicket, Blog, Notification, Review, WhatsAppSettings, WhatsAppClickLog } from './types';
 import { INITIAL_CATEGORIES, INITIAL_PRODUCTS, INITIAL_BLOGS, DEFAULT_SUPER_ADMIN } from './data';
 import { 
   collection, 
@@ -82,8 +82,47 @@ const STORAGE_KEYS = {
   BLOGS: 'healnex_blogs',
   NOTIFICATIONS: 'healnex_notifications',
   REVIEWS: 'healnex_reviews',
-  CURRENT_USER: 'healnex_current_user'
+  CURRENT_USER: 'healnex_current_user',
+  PAYMENT_SETTINGS: 'healnex_payment_settings',
+  WHATSAPP_SETTINGS: 'healnex_whatsapp_settings',
+  WHATSAPP_CLICK_LOGS: 'healnex_whatsapp_click_logs'
 };
+
+import { PaymentSettings } from './types';
+
+export const DEFAULT_PAYMENT_SETTINGS: PaymentSettings = {
+  id: 'global_payment_settings',
+  razorpayEnabled: true,
+  razorpayKeyId: 'rzp_test_Hnx19283746',
+  razorpaySecret: 'shh_secret_91823746',
+  razorpayMode: 'test',
+  
+  upiEnabled: true,
+  upiId: 'payments@hdfcbank',
+  upiHolderName: 'HealNex Medi Bazar Pvt Ltd',
+  upiQrCodeUrl: 'https://images.unsplash.com/photo-1601597111158-2fceff270190',
+  
+  bankEnabled: true,
+  bankHolderName: 'HealNex Medi Bazar Private Limited',
+  bankName: 'HDFC Bank Ltd',
+  bankAccountNumber: '50200098765432',
+  bankIfsc: 'HDFC0001234',
+  bankBranch: 'Senapati Bapat Road, Pune',
+  bankQrCodeUrl: 'https://images.unsplash.com/photo-1601597111158-2fceff270190'
+};
+
+export const DEFAULT_WHATSAPP_SETTINGS: WhatsAppSettings = {
+  id: 'global_whatsapp_settings',
+  enabled: true,
+  phoneNumber: '+919876543210',
+  businessLink: 'https://wa.me/919876543210',
+  defaultMessage: 'Hello Healnex Medi Bazar Support. My name is {CustomerName}. I need help with Order #{OrderNumber} regarding {ProductName}.',
+  position: 'floating',
+  buttonText: 'Chat on WhatsApp',
+  showOnAllScreens: true,
+  selectedScreens: ['Home', 'ProductDetails', 'Cart', 'Checkout', 'Orders', 'Profile', 'HelpSupport']
+};
+
 
 // Seed initial users if empty
 const DEFAULT_USERS: User[] = [
@@ -352,6 +391,9 @@ export const dbLocal = {
     if (!localStorage.getItem(STORAGE_KEYS.BLOGS)) this.set(STORAGE_KEYS.BLOGS, INITIAL_BLOGS);
     if (!localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS)) this.set(STORAGE_KEYS.NOTIFICATIONS, DEFAULT_NOTIFICATIONS);
     if (!localStorage.getItem(STORAGE_KEYS.REVIEWS)) this.set(STORAGE_KEYS.REVIEWS, DEFAULT_REVIEWS);
+    if (!localStorage.getItem(STORAGE_KEYS.PAYMENT_SETTINGS)) this.set(STORAGE_KEYS.PAYMENT_SETTINGS, [DEFAULT_PAYMENT_SETTINGS]);
+    if (!localStorage.getItem(STORAGE_KEYS.WHATSAPP_SETTINGS)) this.set(STORAGE_KEYS.WHATSAPP_SETTINGS, [DEFAULT_WHATSAPP_SETTINGS]);
+    if (!localStorage.getItem(STORAGE_KEYS.WHATSAPP_CLICK_LOGS)) this.set(STORAGE_KEYS.WHATSAPP_CLICK_LOGS, []);
     
     // Do not auto-login by default to allow showing login screen on startup
     if (!localStorage.getItem(STORAGE_KEYS.CURRENT_USER)) {
@@ -371,6 +413,9 @@ export const dbLocal = {
       await seedCollectionIfEmpty('blogs', INITIAL_BLOGS);
       await seedCollectionIfEmpty('notifications', DEFAULT_NOTIFICATIONS);
       await seedCollectionIfEmpty('reviews', DEFAULT_REVIEWS);
+      await seedCollectionIfEmpty('payment_settings', [DEFAULT_PAYMENT_SETTINGS]);
+      await seedCollectionIfEmpty('whatsapp_settings', [DEFAULT_WHATSAPP_SETTINGS]);
+      await seedCollectionIfEmpty('whatsapp_click_logs', []);
 
       // 2. Start real-time Firestore synchronization
       listenToCollection('users', STORAGE_KEYS.USERS, DEFAULT_USERS);
@@ -383,6 +428,9 @@ export const dbLocal = {
       listenToCollection('blogs', STORAGE_KEYS.BLOGS, INITIAL_BLOGS);
       listenToCollection('notifications', STORAGE_KEYS.NOTIFICATIONS, DEFAULT_NOTIFICATIONS);
       listenToCollection('reviews', STORAGE_KEYS.REVIEWS, DEFAULT_REVIEWS);
+      listenToCollection('payment_settings', STORAGE_KEYS.PAYMENT_SETTINGS, [DEFAULT_PAYMENT_SETTINGS]);
+      listenToCollection('whatsapp_settings', STORAGE_KEYS.WHATSAPP_SETTINGS, [DEFAULT_WHATSAPP_SETTINGS]);
+      listenToCollection('whatsapp_click_logs', STORAGE_KEYS.WHATSAPP_CLICK_LOGS, []);
     } catch (err) {
       console.warn('Firebase sync failed to initialize (possibly offline):', err);
     }
@@ -509,6 +557,42 @@ export const dbLocal = {
     const old = this.getReviews();
     this.set(STORAGE_KEYS.REVIEWS, reviews);
     syncListToFirestoreWithDeletions('reviews', reviews, old);
+  },
+
+  // Payment Settings
+  getPaymentSettings(): PaymentSettings {
+    const settings = this.get(STORAGE_KEYS.PAYMENT_SETTINGS, [DEFAULT_PAYMENT_SETTINGS]) as PaymentSettings[];
+    return settings[0] || DEFAULT_PAYMENT_SETTINGS;
+  },
+  savePaymentSettings(settings: PaymentSettings) {
+    this.set(STORAGE_KEYS.PAYMENT_SETTINGS, [settings]);
+    syncListToFirestoreWithDeletions('payment_settings', [settings], []);
+  },
+
+  // WhatsApp Settings
+  getWhatsAppSettings(): WhatsAppSettings {
+    const settings = this.get(STORAGE_KEYS.WHATSAPP_SETTINGS, [DEFAULT_WHATSAPP_SETTINGS]) as WhatsAppSettings[];
+    return settings[0] || DEFAULT_WHATSAPP_SETTINGS;
+  },
+  saveWhatsAppSettings(settings: WhatsAppSettings) {
+    this.set(STORAGE_KEYS.WHATSAPP_SETTINGS, [settings]);
+    syncListToFirestoreWithDeletions('whatsapp_settings', [settings], []);
+  },
+
+  // WhatsApp Click Logs
+  getWhatsAppClickLogs(): WhatsAppClickLog[] {
+    return this.get(STORAGE_KEYS.WHATSAPP_CLICK_LOGS, []);
+  },
+  logWhatsAppClick(logData: Omit<WhatsAppClickLog, 'id' | 'timestamp'>) {
+    const logs = this.getWhatsAppClickLogs();
+    const newLog: WhatsAppClickLog = {
+      ...logData,
+      id: `log-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: new Date().toISOString()
+    };
+    logs.unshift(newLog);
+    this.set(STORAGE_KEYS.WHATSAPP_CLICK_LOGS, logs);
+    syncListToFirestoreWithDeletions('whatsapp_click_logs', logs, []);
   },
 
   // Utility to push notifications
