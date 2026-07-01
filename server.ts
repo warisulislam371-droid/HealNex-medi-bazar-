@@ -1,369 +1,279 @@
-import express from "express";
-import path from "path";
-import crypto from "crypto";
-import { createServer as createViteServer } from "vite";
-import { createClient } from "@supabase/supabase-js";
-import dotenv from "dotenv";
+import express from 'express';
+import path from 'path';
+import { createServer as createViteServer } from 'vite';
+import { GoogleGenAI, Type } from '@google/genai';
+import dotenv from 'dotenv';
 
 dotenv.config();
 
-const app = express();
-const PORT = 3000;
-
-// Middleware for parsing json and urlencoded data
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Supabase Setup
-const supabaseUrl = process.env.SUPABASE_URL || 'https://twtrtttkdabspfezjjpb.supabase.co';
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR3dHJ0dHRrZGFic3BmZXpqanBiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI0MDY2NjEsImV4cCI6MjA5Nzk4MjY2MX0.4bjre_1mKtSjCzXfIKMudaVr6SDS42CqLe2IQkdH3vQ';
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
-
-const isSupabaseConfigured = !!(
-  supabaseUrl &&
-  supabaseUrl !== 'https://placeholder.supabase.co' &&
-  supabaseAnonKey &&
-  supabaseAnonKey !== 'placeholder'
-);
-
-// Helper to authenticate JWT and verify user
-async function authenticateUser(req: express.Request) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return { user: null, error: "No token provided" };
+// Safe lazy initialization of the Google GenAI SDK with recommended header
+const getGeminiClient = () => {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
+    return null;
   }
-  const token = authHeader.substring(7);
-  try {
-    const { data: { user }, error } = await supabase.auth.getUser(token);
-    if (error) return { user: null, error: error.message };
-    return { user, error: null };
-  } catch (err: any) {
-    return { user: null, error: err.message || "Auth error" };
-  }
-}
+  return new GoogleGenAI({
+    apiKey: apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
+  });
+};
 
-// Helper to check if user is admin
-async function checkAdmin(user: any) {
-  if (!user) return false;
-  if (user.email === 'warisulislam371@gmail.com') return true;
-  try {
-    const { data, error } = await supabase
-      .from('users')
-      .select('role')
-      .eq('id', user.id)
-      .single();
-    if (!error && data && (data.role === 'admin' || data.role === 'super_admin')) {
-      return true;
-    }
-  } catch (err) {
-    console.error("Admin check failed:", err);
-  }
-  return false;
-}
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
 
-// -------------------------------------------------------------
-// 1. API: Create Razorpay Order
-// -------------------------------------------------------------
-app.post("/api/create-razorpay-order", async (req, res) => {
-  try {
-    const { cart_items, address_id, amount } = req.body;
-    
-    // Authenticate user
-    const { user, error } = await authenticateUser(req);
-    if (error || !user) {
-      console.warn("Unauthorized order creation request:", error);
-    }
+  app.use(express.json());
 
-    const keyId = process.env.VITE_RAZORPAY_KEY_ID;
-    const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  // Local fallback scoring for semantic search
+  const runLocalSearch = (searchQuery: string, products: any[]) => {
+    const query = searchQuery.toLowerCase();
+    return (products || []).map((p: any) => {
+      const score = (
+        (p.name || '').toLowerCase().includes(query) ? 50 : 0
+      ) + (
+        (p.description || '').toLowerCase().includes(query) ? 30 : 0
+      ) + (
+        (p.category || '').toLowerCase().includes(query) ? 20 : 0
+      );
+      return {
+        productId: p.id,
+        relevanceScore: Math.min(100, Math.max(0, score === 0 ? 10 : score)),
+        aiInsight: `Matched "${p.name || 'Equipment'}" containing local B2B keyword search filter.`,
+      };
+    }).filter((m: any) => m.relevanceScore > 10);
+  };
 
-    // Use amount from request, or calculate from cart_items if required
-    const orderAmount = Number(amount) || 1000; // default/fallback 10 INR
+  // Local fallback scoring for recommendations
+  const runLocalRecommend = (allProducts: any[], cartItems: any[]) => {
+    const cartProductIds = new Set((cartItems || []).map((item: any) => item?.product?.id || item?.productId));
+    const recommendedProducts = (allProducts || []).filter((p: any) => !cartProductIds.has(p.id));
+    const selected = recommendedProducts.length > 0 ? recommendedProducts.slice(0, 2) : (allProducts || []).slice(0, 2);
 
-    if (keyId && keySecret) {
-      // Real Razorpay API call
-      console.log(`Creating real Razorpay Order for ₹${orderAmount}`);
-      const authHeader = "Basic " + Buffer.from(`${keyId}:${keySecret}`).toString("base64");
-      
-      const response = await fetch("https://api.razorpay.com/v1/orders", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": authHeader
-        },
-        body: JSON.stringify({
-          amount: Math.round(orderAmount * 100), // in paise
-          currency: "INR",
-          receipt: `rcpt_${Date.now()}`
-        })
-      });
+    const recommendations = selected.map((p: any) => ({
+      productId: p.id,
+      recommendationReason: `Recommended premium medical equipment (${p.brand || 'HealNex'}) supporting clinical standard B2B setup.`,
+    }));
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Razorpay API error: ${response.status} - ${errorText}`);
-      }
+    return {
+      recommendations,
+      clinicalTip: 'Ensure all newly procured B2B clinical medical equipment undergoes validation and calibration before patient use.'
+    };
+  };
 
-      const rpOrder: any = await response.json();
-      return res.json({
-        order_id: rpOrder.id,
-        key_id: keyId,
-        is_mock: false
-      });
+  // State tracker for Gemini circuit breaker to gracefully handle limited quota limits silently
+  let lastQuotaExceededTime = 0;
+  const COOLDOWN_DURATION = 3 * 60 * 1000; // 3 minutes cooling window
+
+  const isQuotaCooldowned = () => {
+    return (Date.now() - lastQuotaExceededTime) < COOLDOWN_DURATION;
+  };
+
+  const handleQuotaExceeded = (err: any, context: string) => {
+    const errMsg = err?.message || String(err);
+    if (
+      errMsg.includes('429') || 
+      errMsg.includes('quota') || 
+      errMsg.includes('QUOTA') || 
+      errMsg.includes('exhausted') || 
+      errMsg.includes('RESOURCE_EXHAUSTED') ||
+      errMsg.includes('limit')
+    ) {
+      lastQuotaExceededTime = Date.now();
+      console.log(`[Gemini Circuit Breaker] Quota limit detected during ${context}. Entering quiet local fallback mode for 3 minutes.`);
     } else {
-      // Mock Sandbox Response
-      console.log("Razorpay credentials missing. Generating Sandbox Mock Order.");
-      const mockOrderId = "order_mock_" + Math.random().toString(36).substring(2, 11);
-      return res.json({
-        order_id: mockOrderId,
-        key_id: keyId || "rzp_test_mock_keys",
-        is_mock: true
-      });
+      console.log(`[Gemini API Info] ${context} issue:`, errMsg);
     }
-  } catch (err: any) {
-    console.error("Create order failed:", err);
-    res.status(500).json({ error: err.message || "Failed to create order" });
-  }
-});
+  };
 
-// -------------------------------------------------------------
-// 2. API: Auto Commission Split / Mark Delivered
-// -------------------------------------------------------------
-app.post("/api/mark-delivered", async (req, res) => {
-  try {
-    const { order_id, vendor_id, total_amount } = req.body;
-    
-    // Authentication & authorization checks
-    const { user, error } = await authenticateUser(req);
-    // Note: Allow either valid admin user or graceful fallback if supabase is offline
-    let isAdmin = false;
-    if (user) {
-      isAdmin = await checkAdmin(user);
-    }
-
-    console.log(`Marking order ${order_id} as delivered and running commission calculations.`);
-
-    // Fetch vendor and commission configuration
-    let commissionPercent = 10; // default fallback
-    let razorpayRouteEnabled = false;
-    let razorpayAccountId = "";
-
-    if (isSupabaseConfigured) {
-      try {
-        // Get Platform config
-        const { data: configData } = await supabase
-          .from("app_config")
-          .select("default_commission, razorpay_route_enabled")
-          .eq("id", 1)
-          .maybeSingle();
-
-        if (configData) {
-          commissionPercent = configData.default_commission || 10;
-          razorpayRouteEnabled = configData.razorpay_route_enabled || false;
-        }
-
-        // Get specific Vendor commission (if stored on users table)
-        const { data: vendorUser } = await supabase
-          .from("users")
-          .select("commission_percent")
-          .eq("id", vendor_id)
-          .maybeSingle();
-
-        if (vendorUser && vendorUser.commission_percent !== undefined) {
-          commissionPercent = vendorUser.commission_percent;
-        }
-
-        // Get Vendor Payout settings
-        const { data: payoutData } = await supabase
-          .from("vendor_payouts")
-          .select("payment_method, razorpay_account_id")
-          .eq("vendor_id", vendor_id)
-          .maybeSingle();
-
-        if (payoutData) {
-          razorpayAccountId = payoutData.razorpay_account_id || "";
-        }
-      } catch (dbErr) {
-        console.warn("Could not retrieve commission settings from Supabase tables, falling back to request params/defaults:", dbErr);
+  // AI-Powered Semantic Search API
+  app.post('/api/gemini/search', async (req, res) => {
+    try {
+      const { searchQuery, products } = req.body;
+      if (!searchQuery) {
+        return res.json({ matches: [] });
       }
-    }
 
-    // Calculations
-    const commissionAmount = (total_amount * commissionPercent) / 100;
-    const vendorPayout = total_amount - commissionAmount;
+      // Check if circuit breaker is cooling down or API client is disabled
+      if (isQuotaCooldowned()) {
+        const matches = runLocalSearch(searchQuery, products);
+        return res.json({ matches });
+      }
 
-    let transferId = "";
-    let status: 'pending' | 'transferred' = "pending";
-    let transferError = "";
+      const ai = getGeminiClient();
+      if (!ai) {
+        // Fallback to basic text-based scoring when API key is missing (log instead of warn to keep stderr silent)
+        console.log('GEMINI_API_KEY is missing. Falling back to local scoring.');
+        const matches = runLocalSearch(searchQuery, products);
+        return res.json({ matches });
+      }
 
-    const keyId = process.env.VITE_RAZORPAY_KEY_ID;
-    const keySecret = process.env.RAZORPAY_KEY_SECRET;
-
-    // Trigger auto commission transfer via Razorpay Route
-    if (razorpayRouteEnabled && razorpayAccountId && keyId && keySecret) {
       try {
-        console.log(`Initiating Razorpay Route Split Transfer. Amount: ₹${vendorPayout} to Account: ${razorpayAccountId}`);
-        const authHeader = "Basic " + Buffer.from(`${keyId}:${keySecret}`).toString("base64");
-        
-        const transferResponse = await fetch("https://api.razorpay.com/v1/transfers", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": authHeader
+        const productContext = products.map((p: any) => ({
+          id: p.id,
+          name: p.name,
+          brand: p.brand,
+          category: p.category,
+          subcategory: p.subcategory,
+          description: p.description,
+          price: p.salePrice,
+        }));
+
+        const systemPrompt = `You are the HealNex Medi Bazar Clinical Procurement AI Assistant. 
+Analyze the customer's medical search query and rank the catalog products by clinical relevance.
+Return a relevance score from 1 to 100 (where 100 is a perfect match) and a concise, 1-sentence professional "aiInsight" explaining why this medical item fits their search.
+Only return products that have a reasonable clinical relation (score > 20) to the query.`;
+
+        const userMessage = `Search Query: "${searchQuery}"
+Products Catalog: ${JSON.stringify(productContext)}`;
+
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.5-flash',
+          contents: [userMessage],
+          config: {
+            systemInstruction: systemPrompt,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                matches: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      productId: { type: Type.STRING, description: 'The matching product ID.' },
+                      relevanceScore: { type: Type.NUMBER, description: 'The clinical search relevance score between 1 and 100.' },
+                      aiInsight: { type: Type.STRING, description: 'Concise, high-fidelity B2B procurement insight explaining the match.' },
+                    },
+                    required: ['productId', 'relevanceScore', 'aiInsight'],
+                  },
+                },
+              },
+              required: ['matches'],
+            },
           },
-          body: JSON.stringify({
-            account: razorpayAccountId,
-            amount: Math.round(vendorPayout * 100), // in paise
-            currency: "INR",
-            notes: {
-              order_id: order_id
-            }
-          })
         });
 
-        if (transferResponse.ok) {
-          const transData: any = await transferResponse.json();
-          transferId = transData.id || "trsf_" + Math.random().toString(36).substring(2, 11);
-          status = "transferred";
-          console.log(`Razorpay split transfer succeeded. Transfer ID: ${transferId}`);
-        } else {
-          const errorText = await transferResponse.text();
-          transferError = `Razorpay Transfer Failed: ${transferResponse.status} - ${errorText}`;
-          console.error(transferError);
-        }
-      } catch (err: any) {
-        transferError = err.message || "Transfer request exception";
-        console.error("Exception during Razorpay Route transfer:", err);
+        const responseText = response.text || '{}';
+        const parsedData = JSON.parse(responseText);
+        return res.json(parsedData);
+      } catch (innerError: any) {
+        handleQuotaExceeded(innerError, 'semantic search');
+        const matches = runLocalSearch(searchQuery, products);
+        return res.json({ matches });
       }
+    } catch (error: any) {
+      console.log('Semantic search top-level exception handled:', error.message || error);
+      const matches = runLocalSearch(req.body.searchQuery, req.body.products);
+      res.json({ matches });
     }
+  });
 
-    // Save report/log to Supabase if configured
-    if (isSupabaseConfigured) {
+  // AI-Powered Companion Recommendations API
+  app.post('/api/gemini/recommend', async (req, res) => {
+    try {
+      const { cartItems, allProducts, userContext } = req.body;
+
+      // Check if circuit breaker is cooling down or API client is disabled
+      if (isQuotaCooldowned()) {
+        const fallback = runLocalRecommend(allProducts, cartItems);
+        return res.json(fallback);
+      }
+
+      const ai = getGeminiClient();
+
+      if (!ai) {
+        const fallback = runLocalRecommend(allProducts, cartItems);
+        return res.json({
+          recommendations: fallback.recommendations,
+          clinicalTip: 'Configure your GEMINI_API_KEY to unlock advanced deep-clinical copilot recommendations.'
+        });
+      }
+
       try {
-        const { error: logError } = await supabase
-          .from("commission_logs")
-          .insert({
-            order_id: order_id,
-            vendor_id: vendor_id,
-            order_total: total_amount,
-            commission_percent: commissionPercent,
-            commission_amount: commissionAmount,
-            vendor_payout: vendorPayout,
-            status: status,
-            transfer_id: transferId || null,
-            created_at: new Date().toISOString()
-          });
+        const cartSummary = (cartItems || []).map((item: any) => ({
+          name: item?.product?.name,
+          category: item?.product?.category,
+          quantity: item?.quantity,
+        }));
 
-        if (logError) {
-          console.error("Failed to insert commission log in Supabase:", logError);
-        }
-      } catch (dbLogErr) {
-        console.error("Supabase commission log exception:", dbLogErr);
+        const catalogSummary = (allProducts || []).map((p: any) => ({
+          id: p.id,
+          name: p.name,
+          category: p.category,
+          brand: p.brand,
+        }));
+
+        const systemPrompt = `You are the HealNex Clinical Procurement Copilot.
+Suggest complementary companion medical devices, hospital supplies, or consumables from our catalog that are highly clinical and relevant to what is currently in the hospital's shopping cart or their profile.
+Provide 1 to 2 smart, professional recommendations. Also include a "clinicalTip" containing actionable procurement or compliance advice for hospital staff (e.g. regarding CDSCO standards, calibration timelines, sterilization, or shelf-life).`;
+
+        const userMessage = `Current Shopping Cart: ${JSON.stringify(cartSummary)}
+Available Catalog: ${JSON.stringify(catalogSummary)}
+Hospital User Role: ${JSON.stringify(userContext || 'General Clinic')}`;
+
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.5-flash',
+          contents: [userMessage],
+          config: {
+            systemInstruction: systemPrompt,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                recommendations: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      productId: { type: Type.STRING, description: 'The catalog product ID to recommend.' },
+                      recommendationReason: { type: Type.STRING, description: 'A highly convincing, clinically accurate explanation for this complementary B2B setup.' },
+                    },
+                    required: ['productId', 'recommendationReason'],
+                  },
+                },
+                clinicalTip: { type: Type.STRING, description: 'A valuable 1-2 sentence medical procurement compliance or operation tip.' },
+              },
+              required: ['recommendations', 'clinicalTip'],
+            },
+          },
+        });
+
+        const responseText = response.text || '{}';
+        const parsedData = JSON.parse(responseText);
+        return res.json(parsedData);
+      } catch (innerError: any) {
+        handleQuotaExceeded(innerError, 'recommendations');
+        const fallback = runLocalRecommend(allProducts, cartItems);
+        return res.json(fallback);
       }
+    } catch (error: any) {
+      console.log('Recommendations top-level exception handled:', error.message || error);
+      const fallback = runLocalRecommend(req.body.allProducts, req.body.cartItems);
+      res.json(fallback);
     }
+  });
 
-    return res.json({
-      success: true,
-      order_id,
-      vendor_id,
-      order_total: total_amount,
-      commission_percent: commissionPercent,
-      commission_amount: commissionAmount,
-      vendor_payout: vendorPayout,
-      status: status,
-      transfer_id: transferId,
-      error: transferError || undefined
-    });
-  } catch (err: any) {
-    console.error("Mark delivered / split calculations failed:", err);
-    res.status(500).json({ error: err.message || "Failed to calculate splits" });
-  }
-});
-
-// -------------------------------------------------------------
-// 3. API: Razorpay Webhook Integration
-// -------------------------------------------------------------
-app.post("/api/razorpay-webhook", async (req, res) => {
-  try {
-    const signature = req.headers["x-razorpay-signature"];
-    const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-
-    console.log("Received Razorpay Webhook Event:", req.body?.event);
-
-    if (secret && signature) {
-      // Validate signature
-      const expectedSignature = crypto
-        .createHmac("sha256", secret)
-        .update(JSON.stringify(req.body))
-        .digest("hex");
-
-      if (signature !== expectedSignature) {
-        console.warn("Signature verification failed for Razorpay Webhook!");
-        return res.status(400).json({ error: "Invalid Webhook Signature" });
-      }
-      console.log("Razorpay webhook signature verified successfully!");
-    }
-
-    const event = req.body?.event;
-    const payload = req.body?.payload;
-
-    if (event === "payment.captured") {
-      const paymentObj = payload?.payment?.entity;
-      const orderId = paymentObj?.order_id;
-      
-      console.log(`Payment captured for order/payment ${orderId}`);
-      if (isSupabaseConfigured && orderId) {
-        // Update order status to paid in database
-        const { error } = await supabase
-          .from("orders")
-          .update({ status: "paid" })
-          .eq("id", orderId);
-          
-        if (error) {
-          console.error("Webhook order payment status update error:", error);
-        }
-      }
-    } else if (event === "transfer.processed") {
-      const transferObj = payload?.transfer?.entity;
-      const transferId = transferObj?.id;
-      
-      console.log(`Commission transfer processed: ${transferId}`);
-      if (isSupabaseConfigured && transferId) {
-        const { error } = await supabase
-          .from("commission_logs")
-          .update({ status: "transferred" })
-          .eq("transfer_id", transferId);
-          
-        if (error) {
-          console.error("Webhook transfer status update error:", error);
-        }
-      }
-    }
-
-    return res.json({ status: "ok" });
-  } catch (err: any) {
-    console.error("Webhook handler exception:", err);
-    res.status(500).json({ error: err.message || "Webhook processing failed" });
-  }
-});
-
-// Vite Middleware & Static Serving Setup
-async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
+  // Vite development integration or static files serving
+  if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: "spa",
+      appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`HealNex Full-Stack Server running on http://localhost:${PORT}`);
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[HealNex Server] Running full-stack on http://0.0.0.0:${PORT}`);
   });
 }
 

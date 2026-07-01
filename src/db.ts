@@ -1,5 +1,75 @@
 import { User, Vendor, Product, Order, RFQ, Quotation, SupportTicket, Blog, Notification, Review } from './types';
 import { INITIAL_CATEGORIES, INITIAL_PRODUCTS, INITIAL_BLOGS, DEFAULT_SUPER_ADMIN } from './data';
+import { 
+  collection, 
+  doc, 
+  setDoc, 
+  deleteDoc, 
+  getDocs, 
+  onSnapshot 
+} from 'firebase/firestore';
+import { db } from './firebase';
+
+// Helper to seed a collection if empty in Firestore
+async function seedCollectionIfEmpty<T extends { id: string }>(collName: string, defaultData: T[]) {
+  try {
+    const collRef = collection(db, collName);
+    const snap = await getDocs(collRef);
+    if (snap.empty) {
+      console.log(`Seeding Firestore collection '${collName}' with ${defaultData.length} records...`);
+      for (const item of defaultData) {
+        if (!item.id) continue;
+        await setDoc(doc(db, collName, item.id), item);
+      }
+    }
+  } catch (e) {
+    console.error(`Error seeding collection '${collName}':`, e);
+  }
+}
+
+// Helper to sync modified list to Firestore
+async function syncListToFirestoreWithDeletions<T extends { id: string }>(collName: string, items: T[], existingLocalItems: T[]) {
+  try {
+    // Write new or updated items
+    for (const item of items) {
+      if (!item.id) continue;
+      await setDoc(doc(db, collName, item.id), item);
+    }
+    // Delete items that are no longer in the list
+    const incomingIds = new Set(items.map(item => item.id));
+    for (const oldItem of existingLocalItems) {
+      if (!incomingIds.has(oldItem.id)) {
+        await deleteDoc(doc(db, collName, oldItem.id));
+      }
+    }
+  } catch (e) {
+    console.error(`Error syncing list to Firestore collection '${collName}':`, e);
+  }
+}
+
+// Global active real-time listeners tracker to avoid multiple listener attachments
+const activeListeners = new Set<string>();
+
+// Real-time collection synchronization
+function listenToCollection<T extends { id: string }>(collName: string, storageKey: string, defaultValue: T[]) {
+  if (activeListeners.has(collName)) return;
+  activeListeners.add(collName);
+
+  const collRef = collection(db, collName);
+  onSnapshot(collRef, (snapshot) => {
+    const items: T[] = [];
+    snapshot.forEach((docSnap) => {
+      items.push(docSnap.data() as T);
+    });
+    if (items.length > 0) {
+      localStorage.setItem(storageKey, JSON.stringify(items));
+      window.dispatchEvent(new Event('healnex_db_update'));
+    }
+  }, (error) => {
+    console.warn(`Firestore subscription error on '${collName}':`, error);
+  });
+}
+
 
 const STORAGE_KEYS = {
   USERS: 'healnex_users',
@@ -17,7 +87,7 @@ const STORAGE_KEYS = {
 
 // Seed initial users if empty
 const DEFAULT_USERS: User[] = [
-  { ...DEFAULT_SUPER_ADMIN, password: '123654' },
+  { ...DEFAULT_SUPER_ADMIN, password: '654321' },
   {
     id: 'customer-sharma',
     name: 'Dr. Ramesh Sharma',
@@ -270,28 +340,9 @@ export const dbLocal = {
     }
   },
 
-  init() {
-    if (!localStorage.getItem(STORAGE_KEYS.USERS)) {
-      this.set(STORAGE_KEYS.USERS, DEFAULT_USERS);
-    } else {
-      // Migrate existing stored passwords to match the requested 123654 admin credentials
-      try {
-        const existingUsers = this.getUsers();
-        let changed = false;
-        const updated = existingUsers.map(u => {
-          if (u.email === 'warisulislam371@gmail.com' && u.password === '654321') {
-            changed = true;
-            return { ...u, password: '123654' };
-          }
-          return u;
-        });
-        if (changed) {
-          this.saveUsers(updated);
-        }
-      } catch (e) {
-        console.error('Error migrating users: ', e);
-      }
-    }
+  async init() {
+    // Synchronous local state initialization for immediate rendering
+    if (!localStorage.getItem(STORAGE_KEYS.USERS)) this.set(STORAGE_KEYS.USERS, DEFAULT_USERS);
     if (!localStorage.getItem(STORAGE_KEYS.VENDORS)) this.set(STORAGE_KEYS.VENDORS, DEFAULT_VENDORS);
     if (!localStorage.getItem(STORAGE_KEYS.PRODUCTS)) this.set(STORAGE_KEYS.PRODUCTS, INITIAL_PRODUCTS);
     if (!localStorage.getItem(STORAGE_KEYS.ORDERS)) this.set(STORAGE_KEYS.ORDERS, DEFAULT_ORDERS);
@@ -306,11 +357,44 @@ export const dbLocal = {
     if (!localStorage.getItem(STORAGE_KEYS.CURRENT_USER)) {
       this.set(STORAGE_KEYS.CURRENT_USER, null);
     }
+
+    // Background Firebase seeding & listening initialization
+    try {
+      // 1. Seed Firestore collections if empty
+      await seedCollectionIfEmpty('users', DEFAULT_USERS);
+      await seedCollectionIfEmpty('vendors', DEFAULT_VENDORS);
+      await seedCollectionIfEmpty('products', INITIAL_PRODUCTS);
+      await seedCollectionIfEmpty('orders', DEFAULT_ORDERS);
+      await seedCollectionIfEmpty('rfqs', DEFAULT_RFQS);
+      await seedCollectionIfEmpty('quotations', DEFAULT_QUOTATIONS);
+      await seedCollectionIfEmpty('tickets', DEFAULT_TICKETS);
+      await seedCollectionIfEmpty('blogs', INITIAL_BLOGS);
+      await seedCollectionIfEmpty('notifications', DEFAULT_NOTIFICATIONS);
+      await seedCollectionIfEmpty('reviews', DEFAULT_REVIEWS);
+
+      // 2. Start real-time Firestore synchronization
+      listenToCollection('users', STORAGE_KEYS.USERS, DEFAULT_USERS);
+      listenToCollection('vendors', STORAGE_KEYS.VENDORS, DEFAULT_VENDORS);
+      listenToCollection('products', STORAGE_KEYS.PRODUCTS, INITIAL_PRODUCTS);
+      listenToCollection('orders', STORAGE_KEYS.ORDERS, DEFAULT_ORDERS);
+      listenToCollection('rfqs', STORAGE_KEYS.RFQS, DEFAULT_RFQS);
+      listenToCollection('quotations', STORAGE_KEYS.QUOTATIONS, DEFAULT_QUOTATIONS);
+      listenToCollection('tickets', STORAGE_KEYS.TICKETS, DEFAULT_TICKETS);
+      listenToCollection('blogs', STORAGE_KEYS.BLOGS, INITIAL_BLOGS);
+      listenToCollection('notifications', STORAGE_KEYS.NOTIFICATIONS, DEFAULT_NOTIFICATIONS);
+      listenToCollection('reviews', STORAGE_KEYS.REVIEWS, DEFAULT_REVIEWS);
+    } catch (err) {
+      console.warn('Firebase sync failed to initialize (possibly offline):', err);
+    }
   },
 
   // Users
   getUsers(): User[] { return this.get(STORAGE_KEYS.USERS, DEFAULT_USERS); },
-  saveUsers(users: User[]) { this.set(STORAGE_KEYS.USERS, users); },
+  saveUsers(users: User[]) {
+    const old = this.getUsers();
+    this.set(STORAGE_KEYS.USERS, users);
+    syncListToFirestoreWithDeletions('users', users, old);
+  },
 
   // Current logged in User
   getCurrentUser(): User | null { return this.get(STORAGE_KEYS.CURRENT_USER, null); },
@@ -318,39 +402,75 @@ export const dbLocal = {
 
   // Vendors
   getVendors(): Vendor[] { return this.get(STORAGE_KEYS.VENDORS, DEFAULT_VENDORS); },
-  saveVendors(vendors: Vendor[]) { this.set(STORAGE_KEYS.VENDORS, vendors); },
+  saveVendors(vendors: Vendor[]) {
+    const old = this.getVendors();
+    this.set(STORAGE_KEYS.VENDORS, vendors);
+    syncListToFirestoreWithDeletions('vendors', vendors, old);
+  },
 
   // Products
   getProducts(): Product[] { return this.get(STORAGE_KEYS.PRODUCTS, INITIAL_PRODUCTS); },
-  saveProducts(products: Product[]) { this.set(STORAGE_KEYS.PRODUCTS, products); },
+  saveProducts(products: Product[]) {
+    const old = this.getProducts();
+    this.set(STORAGE_KEYS.PRODUCTS, products);
+    syncListToFirestoreWithDeletions('products', products, old);
+  },
 
   // Orders
   getOrders(): Order[] { return this.get(STORAGE_KEYS.ORDERS, DEFAULT_ORDERS); },
-  saveOrders(orders: Order[]) { this.set(STORAGE_KEYS.ORDERS, orders); },
+  saveOrders(orders: Order[]) {
+    const old = this.getOrders();
+    this.set(STORAGE_KEYS.ORDERS, orders);
+    syncListToFirestoreWithDeletions('orders', orders, old);
+  },
 
   // RFQs
   getRfqs(): RFQ[] { return this.get(STORAGE_KEYS.RFQS, DEFAULT_RFQS); },
-  saveRfqs(rfqs: RFQ[]) { this.set(STORAGE_KEYS.RFQS, rfqs); },
+  saveRfqs(rfqs: RFQ[]) {
+    const old = this.getRfqs();
+    this.set(STORAGE_KEYS.RFQS, rfqs);
+    syncListToFirestoreWithDeletions('rfqs', rfqs, old);
+  },
 
   // Quotations
   getQuotations(): Quotation[] { return this.get(STORAGE_KEYS.QUOTATIONS, DEFAULT_QUOTATIONS); },
-  saveQuotations(quotations: Quotation[]) { this.set(STORAGE_KEYS.QUOTATIONS, quotations); },
+  saveQuotations(quotations: Quotation[]) {
+    const old = this.getQuotations();
+    this.set(STORAGE_KEYS.QUOTATIONS, quotations);
+    syncListToFirestoreWithDeletions('quotations', quotations, old);
+  },
 
   // Tickets
   getTickets(): SupportTicket[] { return this.get(STORAGE_KEYS.TICKETS, DEFAULT_TICKETS); },
-  saveTickets(tickets: SupportTicket[]) { this.set(STORAGE_KEYS.TICKETS, tickets); },
+  saveTickets(tickets: SupportTicket[]) {
+    const old = this.getTickets();
+    this.set(STORAGE_KEYS.TICKETS, tickets);
+    syncListToFirestoreWithDeletions('tickets', tickets, old);
+  },
 
   // Blogs
   getBlogs(): Blog[] { return this.get(STORAGE_KEYS.BLOGS, INITIAL_BLOGS); },
-  saveBlogs(blogs: Blog[]) { this.set(STORAGE_KEYS.BLOGS, blogs); },
+  saveBlogs(blogs: Blog[]) {
+    const old = this.getBlogs();
+    this.set(STORAGE_KEYS.BLOGS, blogs);
+    syncListToFirestoreWithDeletions('blogs', blogs, old);
+  },
 
   // Notifications
   getNotifications(): Notification[] { return this.get(STORAGE_KEYS.NOTIFICATIONS, DEFAULT_NOTIFICATIONS); },
-  saveNotifications(notifs: Notification[]) { this.set(STORAGE_KEYS.NOTIFICATIONS, notifs); },
+  saveNotifications(notifs: Notification[]) {
+    const old = this.getNotifications();
+    this.set(STORAGE_KEYS.NOTIFICATIONS, notifs);
+    syncListToFirestoreWithDeletions('notifications', notifs, old);
+  },
 
   // Reviews
   getReviews(): Review[] { return this.get(STORAGE_KEYS.REVIEWS, DEFAULT_REVIEWS); },
-  saveReviews(reviews: Review[]) { this.set(STORAGE_KEYS.REVIEWS, reviews); },
+  saveReviews(reviews: Review[]) {
+    const old = this.getReviews();
+    this.set(STORAGE_KEYS.REVIEWS, reviews);
+    syncListToFirestoreWithDeletions('reviews', reviews, old);
+  },
 
   // Utility to push notifications
   addNotification(userId: string, title: string, message: string, type: Notification['type']) {

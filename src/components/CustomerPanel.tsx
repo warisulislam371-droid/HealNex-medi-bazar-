@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { dbLocal } from '../db';
 import { Product, Order, RFQ, Quotation, Category, Review, User, OrderItem } from '../types';
 import { INITIAL_CATEGORIES } from '../data';
@@ -28,7 +28,8 @@ import {
   ArrowRight,
   ShieldCheck,
   Building,
-  UserCheck
+  UserCheck,
+  Sparkles
 } from 'lucide-react';
 import InvoicePDF from './InvoicePDF';
 
@@ -47,6 +48,7 @@ interface CustomerPanelProps {
   selectedCategoryName: string;
   onCategorySelect: (catName: string) => void;
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  isDarkMode?: boolean;
 }
 
 export default function CustomerPanel({
@@ -63,13 +65,22 @@ export default function CustomerPanel({
   onClearSearch,
   selectedCategoryName,
   onCategorySelect,
-  addToast
+  addToast,
+  isDarkMode = false
 }: CustomerPanelProps) {
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [rfqs, setRfqs] = useState<RFQ[]>([]);
   const [quotations, setQuotations] = useState<Quotation[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
+
+  // AI-Powered state variables
+  const [aiSearchResults, setAiSearchResults] = useState<{ productId: string; relevanceScore: number; aiInsight: string }[]>([]);
+  const [isAiSearching, setIsAiSearching] = useState(false);
+  
+  const [aiRecommendations, setAiRecommendations] = useState<{ productId: string; recommendationReason: string }[]>([]);
+  const [aiClinicalTip, setAiClinicalTip] = useState('');
+  const [isAiRecommending, setIsAiRecommending] = useState(false);
 
   // Detailed Modal view of a product
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
@@ -104,21 +115,43 @@ export default function CustomerPanel({
   // RFQ review comparator state
   const [activeRfqReview, setActiveRfqReview] = useState<RFQ | null>(null);
 
+  // References to keep track of previous API request payloads to avoid infinite quota-draining requests
+  const lastSearchKeyRef = useRef<string>('');
+  const lastRecommendKeyRef = useRef<string>('');
+
   const loadData = () => {
     // Only approved products are visible to customers
     const approvedProducts = dbLocal.getProducts().filter(p => p.status === 'Approved');
-    setProducts(approvedProducts);
+    setProducts(prev => {
+      if (JSON.stringify(prev) === JSON.stringify(approvedProducts)) return prev;
+      return approvedProducts;
+    });
 
     if (currentUser) {
       const myOrders = dbLocal.getOrders().filter(o => o.customerId === currentUser.id);
-      setOrders(myOrders);
+      setOrders(prev => {
+        if (JSON.stringify(prev) === JSON.stringify(myOrders)) return prev;
+        return myOrders;
+      });
 
       const myRfqs = dbLocal.getRfqs().filter(r => r.customerId === currentUser.id);
-      setRfqs(myRfqs);
+      setRfqs(prev => {
+        if (JSON.stringify(prev) === JSON.stringify(myRfqs)) return prev;
+        return myRfqs;
+      });
 
-      setQuotations(dbLocal.getQuotations());
+      const allQuotations = dbLocal.getQuotations();
+      setQuotations(prev => {
+        if (JSON.stringify(prev) === JSON.stringify(allQuotations)) return prev;
+        return allQuotations;
+      });
     }
-    setReviews(dbLocal.getReviews());
+
+    const allReviews = dbLocal.getReviews();
+    setReviews(prev => {
+      if (JSON.stringify(prev) === JSON.stringify(allReviews)) return prev;
+      return allReviews;
+    });
   };
 
   useEffect(() => {
@@ -127,25 +160,137 @@ export default function CustomerPanel({
     return () => clearInterval(interval);
   }, [currentUser]);
 
-  // Filters calculation
-  const filteredProducts = products.filter(p => {
-    const matchesSearch = searchQuery
-      ? p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        p.brand.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        p.category.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        p.subcategory.toLowerCase().includes(searchQuery.toLowerCase())
-      : true;
+  // Fetch semantic search results from Express server powered by Gemini
+  useEffect(() => {
+    if (!searchQuery || products.length === 0) {
+      setAiSearchResults([]);
+      lastSearchKeyRef.current = '';
+      return;
+    }
 
-    const matchesCategory = selectedCategoryName
-      ? p.category.toLowerCase() === selectedCategoryName.toLowerCase()
-      : true;
+    // Stabilize search execution using a composite hash key
+    const currentSearchKey = `${searchQuery}::${products.map(p => p.id).sort().join(',')}`;
+    if (lastSearchKeyRef.current === currentSearchKey) {
+      return; // Do not fetch again if nothing changed
+    }
 
-    const matchesBrand = filterBrand ? p.brand.toLowerCase().includes(filterBrand.toLowerCase()) : true;
-    const matchesPrice = p.salePrice <= filterPriceRange;
-    const matchesMoq = p.moq <= filterMoq;
+    const triggerAiSearch = async () => {
+      lastSearchKeyRef.current = currentSearchKey;
+      setIsAiSearching(true);
+      try {
+        const res = await fetch('/api/gemini/search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ searchQuery, products })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.matches) {
+            setAiSearchResults(data.matches);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to run AI search:', err);
+      } finally {
+        setIsAiSearching(false);
+      }
+    };
 
-    return matchesSearch && matchesCategory && matchesBrand && matchesPrice && matchesMoq;
-  });
+    const timer = setTimeout(triggerAiSearch, 400);
+    return () => clearTimeout(timer);
+  }, [searchQuery, products]);
+
+  // Fetch complementary recommendations and compliance advice
+  useEffect(() => {
+    if (products.length === 0) {
+      return;
+    }
+
+    // Stabilize recommendation execution using a composite hash key of cart, catalog, and current user
+    const currentRecommendKey = JSON.stringify({
+      cartIds: (cart || []).map(i => `${i.product.id}-${i.quantity}`),
+      userId: currentUser?.id || 'guest',
+      productIds: products.map(p => p.id).sort()
+    });
+
+    if (lastRecommendKeyRef.current === currentRecommendKey) {
+      return; // Do not fetch again if nothing changed
+    }
+
+    const fetchRecommendations = async () => {
+      lastRecommendKeyRef.current = currentRecommendKey;
+      setIsAiRecommending(true);
+      try {
+        const res = await fetch('/api/gemini/recommend', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            cartItems: cart,
+            allProducts: products,
+            userContext: currentUser ? { name: currentUser.name, role: currentUser.role } : 'Guest'
+          })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data) {
+            if (data.recommendations) setAiRecommendations(data.recommendations);
+            if (data.clinicalTip) setAiClinicalTip(data.clinicalTip);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch AI recommendations:', err);
+      } finally {
+        setIsAiRecommending(false);
+      }
+    };
+
+    fetchRecommendations();
+  }, [cart, products, currentUser]);
+
+  // Filters calculation & Semantic AI ranking integration
+  const filteredProducts = React.useMemo(() => {
+    // 1. Filter out non-matching products
+    const matched = products.filter(p => {
+      const matchesCategory = selectedCategoryName
+        ? p.category.toLowerCase() === selectedCategoryName.toLowerCase()
+        : true;
+
+      const matchesBrand = filterBrand ? p.brand.toLowerCase().includes(filterBrand.toLowerCase()) : true;
+      const matchesPrice = p.salePrice <= filterPriceRange;
+      const matchesMoq = p.moq <= filterMoq;
+
+      if (!matchesCategory || !matchesBrand || !matchesPrice || !matchesMoq) return false;
+
+      // If we have search query
+      if (searchQuery) {
+        // If AI search results exist, check if this product was found as clinically relevant
+        if (aiSearchResults.length > 0) {
+          return aiSearchResults.some(match => match.productId === p.id);
+        }
+
+        // Fallback to basic text-based search
+        return (
+          p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          p.brand.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          p.category.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          p.subcategory.toLowerCase().includes(searchQuery.toLowerCase())
+        );
+      }
+
+      return true;
+    });
+
+    // 2. Sort by AI Relevance score if active search is running and results are present
+    if (searchQuery && aiSearchResults.length > 0) {
+      return [...matched].sort((a, b) => {
+        const scoreA = aiSearchResults.find(m => m.productId === a.id)?.relevanceScore || 0;
+        const scoreB = aiSearchResults.find(m => m.productId === b.id)?.relevanceScore || 0;
+        return scoreB - scoreA;
+      });
+    }
+
+    return matched;
+  }, [products, searchQuery, selectedCategoryName, filterBrand, filterPriceRange, filterMoq, aiSearchResults]);
 
   const handleToggleWishlist = (id: string) => {
     let updated: string[];
@@ -495,6 +640,26 @@ export default function CustomerPanel({
             </div>
           </div>
 
+          {/* AI Clinical Compliance Tip Panel */}
+          {aiClinicalTip && (
+            <div className={`p-5 rounded-3xl border flex items-start gap-4 transition-all shadow-md ${
+              isDarkMode 
+                ? 'bg-slate-900 border-teal-950 text-slate-100' 
+                : 'bg-gradient-to-r from-teal-50/50 to-teal-50/10 border-teal-100 text-slate-800'
+            }`}>
+              <div className="bg-teal-500/10 text-teal-500 p-2.5 rounded-2xl shrink-0">
+                <Sparkles className="w-5 h-5 text-teal-600 animate-pulse" />
+              </div>
+              <div className="text-xs space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-bold text-[10px] text-teal-600 uppercase tracking-widest font-display">AI clinical procurement advisory</span>
+                  <span className="bg-teal-500/15 text-teal-600 text-[8px] font-bold px-1.5 py-0.5 rounded font-mono">LIVE CO-PILOT</span>
+                </div>
+                <p className="leading-relaxed font-semibold">{aiClinicalTip}</p>
+              </div>
+            </div>
+          )}
+
           {/* Categories Horizontal Directory */}
           <div className="space-y-3">
             <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Clinical Specialities</h3>
@@ -597,6 +762,39 @@ export default function CustomerPanel({
 
             {/* Catalog Grid */}
             <div className="lg:col-span-3 space-y-4">
+              {isAiSearching && (
+                <div className={`p-4 rounded-2xl border flex items-center justify-between gap-3 animate-pulse shadow-sm ${
+                  isDarkMode 
+                    ? 'bg-teal-950/20 border-teal-850/50 text-teal-300' 
+                    : 'bg-teal-50 border-teal-100 text-teal-800'
+                }`}>
+                  <div className="flex items-center gap-2.5 text-xs font-semibold">
+                    <Loader2 className="w-4 h-4 text-teal-500 animate-spin" />
+                    <span>Gemini AI is semantic-matching the clinical catalog for "{searchQuery}"...</span>
+                  </div>
+                  <span className="text-[10px] font-mono uppercase bg-teal-500/10 px-2 py-0.5 rounded tracking-wider">Deep Semantic Mode</span>
+                </div>
+              )}
+
+              {searchQuery && !isAiSearching && aiSearchResults.length > 0 && (
+                <div className={`p-3 rounded-2xl border flex items-center justify-between gap-3 shadow-sm ${
+                  isDarkMode 
+                    ? 'bg-slate-900 border-slate-800 text-slate-300' 
+                    : 'bg-slate-50 border-slate-200 text-slate-600'
+                }`}>
+                  <div className="flex items-center gap-2 text-xs font-medium">
+                    <Sparkles className="w-4 h-4 text-teal-500" />
+                    <span>Gemini AI successfully matched and sorted {filteredProducts.length} clinical instruments matching your query.</span>
+                  </div>
+                  <button 
+                    onClick={onClearSearch}
+                    className="text-[10px] font-bold text-teal-600 hover:text-teal-800 uppercase cursor-pointer"
+                  >
+                    Clear
+                  </button>
+                </div>
+              )}
+
               {filteredProducts.length === 0 ? (
                 <div className="p-16 text-center text-slate-400 bg-white rounded-2xl border border-slate-200">
                   <SlidersHorizontal className="w-10 h-10 mx-auto mb-2 opacity-30" />
@@ -607,10 +805,15 @@ export default function CustomerPanel({
                   {filteredProducts.map((p) => {
                     const hasWish = wishlist.includes(p.id);
                     const hasComp = compareList.some(item => item.id === p.id);
+                    const aiMatch = aiSearchResults.find(m => m.productId === p.id);
                     return (
                       <div
                         key={p.id}
-                        className="bg-white rounded-2xl border border-slate-200/80 hover:border-slate-300 shadow-sm overflow-hidden flex flex-col justify-between group transition-all hover:shadow-md"
+                        className={`rounded-2xl border shadow-sm overflow-hidden flex flex-col justify-between group transition-all hover:shadow-md ${
+                          isDarkMode
+                            ? 'bg-slate-900 border-slate-800 hover:border-slate-700 text-slate-100'
+                            : 'bg-white border-slate-200/80 hover:border-slate-300 text-slate-800'
+                        }`}
                       >
                         {/* Image banner */}
                         <div className="relative bg-slate-100 h-44 overflow-hidden shrink-0">
@@ -619,10 +822,16 @@ export default function CustomerPanel({
                             alt={p.name}
                             className="w-full h-full object-cover transition-transform group-hover:scale-105"
                           />
+                          {aiMatch && (
+                            <span className="absolute top-2.5 left-2.5 bg-gradient-to-r from-teal-600 to-emerald-600 text-white text-[9px] font-bold px-2 py-1 rounded-full shadow-md flex items-center gap-1 animate-pulse z-10">
+                              <Sparkles className="w-3 h-3 text-yellow-300 fill-current" />
+                              {aiMatch.relevanceScore}% Clinical Match
+                            </span>
+                          )}
                           <button
                             onClick={() => handleToggleWishlist(p.id)}
                             className={`p-1.5 rounded-full absolute top-2.5 right-2.5 transition ${
-                              hasWish ? 'bg-rose-500 text-white' : 'bg-white text-slate-400 hover:text-rose-500'
+                              hasWish ? 'bg-rose-500 text-white' : 'bg-white text-slate-400 hover:text-rose-500 shadow'
                             }`}
                           >
                             <Heart className="w-4 h-4 fill-current" />
@@ -632,38 +841,71 @@ export default function CustomerPanel({
                         {/* Card Body */}
                         <div className="p-4 flex-1 flex flex-col justify-between space-y-3 text-xs">
                           <div>
-                            <span className="text-[9px] bg-slate-100 text-slate-500 font-bold px-2 py-0.5 rounded uppercase tracking-wider">
+                            <span className={`text-[9px] font-bold px-2 py-0.5 rounded uppercase tracking-wider ${
+                              isDarkMode ? 'bg-slate-800 text-slate-300' : 'bg-slate-100 text-slate-500'
+                            }`}>
                               {p.brand}
                             </span>
                             <h4
                               onClick={() => setSelectedProduct(p)}
-                              className="font-bold text-slate-900 mt-1 line-clamp-1 hover:text-teal-700 hover:underline cursor-pointer"
+                              className={`font-bold mt-1 line-clamp-1 hover:text-teal-400 hover:underline cursor-pointer ${
+                                isDarkMode ? 'text-white' : 'text-slate-900'
+                              }`}
                             >
                               {p.name}
                             </h4>
-                            <p className="text-[11px] text-slate-500 line-clamp-2 mt-1 leading-relaxed">
+                            <p className={`text-[11px] line-clamp-2 mt-1 leading-relaxed ${
+                              isDarkMode ? 'text-slate-300' : 'text-slate-500'
+                            }`}>
                               {p.description}
                             </p>
+
+                            {/* AI Semantic Search Insight */}
+                            {aiMatch && (
+                              <div className={`mt-2.5 p-2 rounded-lg text-[10px] flex gap-1.5 items-start border leading-normal ${
+                                isDarkMode 
+                                  ? 'bg-teal-950/30 text-teal-300 border-teal-850/50' 
+                                  : 'bg-teal-50 text-teal-800 border-teal-100'
+                              }`}>
+                                <Sparkles className="w-3.5 h-3.5 text-teal-500 shrink-0 mt-0.5" />
+                                <div>
+                                  <span className="font-bold">Clinical Insight: </span>
+                                  {aiMatch.aiInsight}
+                                </div>
+                              </div>
+                            )}
                           </div>
 
-                          <div className="border-t border-slate-50 pt-2 flex items-center justify-between">
+                          <div className={`border-t pt-2 flex items-center justify-between ${
+                            isDarkMode ? 'border-slate-800' : 'border-slate-50'
+                          }`}>
                             <div>
                               <span className="text-slate-400 text-[10px] block">Price (Excl Tax)</span>
-                              <span className="text-sm font-bold text-teal-800">₹{p.salePrice.toLocaleString('en-IN')}</span>
+                              <span className={`text-sm font-bold ${isDarkMode ? 'text-teal-400' : 'text-teal-800'}`}>
+                                ₹{p.salePrice.toLocaleString('en-IN')}
+                              </span>
                             </div>
                             <div className="text-right">
                               <span className="text-slate-400 text-[10px] block">MOQ Requirement</span>
-                              <span className="font-semibold text-slate-700">{p.moq} unit(s)</span>
+                              <span className={`font-semibold ${isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>
+                                {p.moq} unit(s)
+                              </span>
                             </div>
                           </div>
                         </div>
 
                         {/* Card Foot action bars */}
-                        <div className="bg-slate-50 px-4 py-3 border-t border-slate-100 flex items-center justify-between gap-2 shrink-0">
+                        <div className={`px-4 py-3 border-t flex items-center justify-between gap-2 shrink-0 ${
+                          isDarkMode ? 'bg-slate-950/40 border-slate-800' : 'bg-slate-50 border-slate-100'
+                        }`}>
                           <button
                             onClick={() => handleToggleCompare(p)}
-                            className={`flex items-center gap-1 text-[10px] font-bold py-1 px-2.5 rounded ${
-                              hasComp ? 'bg-orange-500 text-white' : 'text-slate-500 hover:bg-slate-100'
+                            className={`flex items-center gap-1 text-[10px] font-bold py-1 px-2.5 rounded transition-colors ${
+                              hasComp 
+                                ? 'bg-orange-500 text-white' 
+                                : isDarkMode 
+                                  ? 'text-slate-400 hover:bg-slate-800' 
+                                  : 'text-slate-500 hover:bg-slate-100'
                             }`}
                           >
                             <Scale className="w-3.5 h-3.5" />
@@ -744,59 +986,116 @@ export default function CustomerPanel({
           {checkoutStep === 'cart' && (
             <>
               {/* Cart List */}
-              <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm lg:col-span-2 space-y-4">
-                <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider mb-4 flex items-center gap-2">
-                  <ShoppingCart className="w-5 h-5 text-teal-700" />
-                  Clinical Procurement Cart
-                </h3>
+              <div className="space-y-6 lg:col-span-2">
+                <div className={`p-6 rounded-2xl border shadow-sm space-y-4 ${
+                  isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'
+                }`}>
+                  <h3 className={`text-sm font-bold uppercase tracking-wider mb-4 flex items-center gap-2 ${
+                    isDarkMode ? 'text-teal-400' : 'text-slate-800'
+                  }`}>
+                    <ShoppingCart className="w-5 h-5 text-teal-700" />
+                    Clinical Procurement Cart
+                  </h3>
 
-                {cart.length === 0 ? (
-                  <div className="p-12 text-center text-slate-400">
-                    <ShoppingCart className="w-12 h-12 mx-auto mb-2 opacity-30" />
-                    <p className="text-xs">Your procurement cart is empty. Explore catalog to add certified equipment.</p>
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    {cart.map((item) => (
-                      <div key={item.product.id} className="p-4 rounded-xl border border-slate-100 flex flex-col sm:flex-row gap-4 items-start sm:items-center hover:bg-slate-50/50 transition">
-                        <img
-                          src={item.product.images[0]}
-                          alt={item.product.name}
-                          className="w-16 h-16 object-cover rounded-xl border border-slate-100 shrink-0"
-                        />
-                        <div className="flex-1 text-xs">
-                          <h4 className="font-bold text-slate-900">{item.product.name}</h4>
-                          <p className="text-[10px] text-slate-400 mt-0.5">Supplier: {item.product.vendorName}</p>
-                          <div className="flex items-center gap-4 mt-2">
-                            <span className="font-bold text-teal-800">₹{item.product.salePrice.toLocaleString('en-IN')}</span>
-                            <span className="text-[10px] text-slate-400">HSN: {item.product.hsnCode} | GST: {item.product.gstRate}%</span>
+                  {cart.length === 0 ? (
+                    <div className="p-12 text-center text-slate-400">
+                      <ShoppingCart className="w-12 h-12 mx-auto mb-2 opacity-30" />
+                      <p className="text-xs">Your procurement cart is empty. Explore catalog to add certified equipment.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {cart.map((item) => (
+                        <div key={item.product.id} className={`p-4 rounded-xl border flex flex-col sm:flex-row gap-4 items-start sm:items-center transition ${
+                          isDarkMode ? 'border-slate-800 hover:bg-slate-800/40' : 'border-slate-100 hover:bg-slate-50/50'
+                        }`}>
+                          <img
+                            src={item.product.images[0]}
+                            alt={item.product.name}
+                            className="w-16 h-16 object-cover rounded-xl border border-slate-100 shrink-0"
+                          />
+                          <div className="flex-1 text-xs">
+                            <h4 className={`font-bold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{item.product.name}</h4>
+                            <p className="text-[10px] text-slate-400 mt-0.5">Supplier: {item.product.vendorName}</p>
+                            <div className="flex items-center gap-4 mt-2">
+                              <span className={`font-bold ${isDarkMode ? 'text-teal-400' : 'text-teal-800'}`}>₹{item.product.salePrice.toLocaleString('en-IN')}</span>
+                              <span className="text-[10px] text-slate-400">HSN: {item.product.hsnCode} | GST: {item.product.gstRate}%</span>
+                            </div>
+                          </div>
+
+                          {/* Qty controls */}
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => handleUpdateCartQty(item.product.id, item.quantity - 1, item.product.moq)}
+                              className={`p-1 rounded ${isDarkMode ? 'bg-slate-800 hover:bg-slate-700' : 'bg-slate-100 hover:bg-slate-200'}`}
+                            >
+                              <Minus className="w-3.5 h-3.5" />
+                            </button>
+                            <span className="font-mono text-xs font-bold w-8 text-center">{item.quantity}</span>
+                            <button
+                              onClick={() => handleUpdateCartQty(item.product.id, item.quantity + 1, item.product.moq)}
+                              className={`p-1 rounded ${isDarkMode ? 'bg-slate-800 hover:bg-slate-700' : 'bg-slate-100 hover:bg-slate-200'}`}
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleRemoveFromCart(item.product.id)}
+                              className="text-xs font-bold text-rose-600 hover:text-rose-800 ml-4 cursor-pointer"
+                            >
+                              Remove
+                            </button>
                           </div>
                         </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
-                        {/* Qty controls */}
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => handleUpdateCartQty(item.product.id, item.quantity - 1, item.product.moq)}
-                            className="p-1 bg-slate-100 hover:bg-slate-200 rounded"
-                          >
-                            <Minus className="w-3.5 h-3.5" />
-                          </button>
-                          <span className="font-mono text-xs font-bold w-8 text-center">{item.quantity}</span>
-                          <button
-                            onClick={() => handleUpdateCartQty(item.product.id, item.quantity + 1, item.product.moq)}
-                            className="p-1 bg-slate-100 hover:bg-slate-200 rounded"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => handleRemoveFromCart(item.product.id)}
-                            className="text-xs font-bold text-rose-600 hover:text-rose-800 ml-4"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      </div>
-                    ))}
+                {/* AI Companion Procurement Recommendations Panel */}
+                {cart.length > 0 && aiRecommendations.length > 0 && (
+                  <div className={`p-6 rounded-2xl border shadow-md space-y-4 ${
+                    isDarkMode 
+                      ? 'bg-slate-900 border-teal-950 text-slate-100' 
+                      : 'bg-gradient-to-r from-teal-50/50 to-teal-50/10 border-teal-100 text-slate-800'
+                  }`}>
+                    <div className="flex items-center gap-2 pb-2 border-b border-teal-150/10">
+                      <Sparkles className="w-4 h-4 text-teal-600 animate-pulse" />
+                      <h4 className="text-xs font-bold uppercase tracking-wider font-display text-teal-600">AI Clinical Procurement Companion Recommendations</h4>
+                    </div>
+                    
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                      {aiRecommendations.map((rec) => {
+                        const recommendedProduct = products.find(p => p.id === rec.productId);
+                        if (!recommendedProduct) return null;
+                        return (
+                          <div key={rec.productId} className={`p-4 rounded-xl border flex gap-3 flex-col justify-between ${
+                            isDarkMode ? 'bg-slate-950/60 border-slate-800' : 'bg-white border-slate-200'
+                          }`}>
+                            <div className="flex gap-3">
+                              <img 
+                                src={recommendedProduct.images[0]} 
+                                alt={recommendedProduct.name} 
+                                className="w-12 h-12 object-cover rounded-lg border border-slate-100 shrink-0"
+                              />
+                              <div>
+                                <h5 className="font-bold leading-tight truncate max-w-[180px]">{recommendedProduct.name}</h5>
+                                <p className="text-[10px] text-teal-600 uppercase font-bold mt-0.5">{recommendedProduct.brand}</p>
+                                <p className="text-[10px] text-slate-400 mt-1 font-medium leading-relaxed">{rec.recommendationReason}</p>
+                              </div>
+                            </div>
+                            
+                            <div className="flex justify-between items-center border-t border-slate-100/10 pt-2.5 mt-1.5">
+                              <span className="font-bold text-teal-700 font-mono">₹{recommendedProduct.salePrice.toLocaleString('en-IN')}</span>
+                              <button
+                                onClick={() => handleAddToCart(recommendedProduct)}
+                                className="bg-teal-700 hover:bg-teal-800 text-white font-bold py-1 px-3 rounded-lg text-[9px] uppercase tracking-wide cursor-pointer"
+                              >
+                                Add
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 )}
               </div>
