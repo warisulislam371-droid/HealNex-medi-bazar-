@@ -307,69 +307,7 @@ export default function Navbar({
               )}
             </button>
 
-            {/* Design Template Switcher */}
-            <div className="relative">
-              <button
-                onClick={() => {
-                  setShowTemplateDropdown(!showTemplateDropdown);
-                  setShowNotifications(false);
-                  setShowUserDropdown(false);
-                }}
-                className={`p-2 rounded-xl transition cursor-pointer ${
-                  showTemplateDropdown 
-                    ? 'bg-teal-50 dark:bg-slate-800 text-teal-700' 
-                    : 'text-slate-500 hover:bg-slate-100 hover:text-teal-700'
-                }`}
-                title="Change Design Template / Palette"
-              >
-                <Palette className="w-5 h-5" />
-              </button>
 
-              {showTemplateDropdown && (
-                <div className={`absolute right-0 mt-2.5 w-64 rounded-2xl shadow-2xl border p-3.5 z-50 overflow-hidden font-sans ${
-                  isDarkMode 
-                    ? 'bg-slate-900 text-slate-100 border-slate-800' 
-                    : 'bg-white text-slate-800 border-slate-100'
-                }`}>
-                  <div className="mb-2.5 pb-2 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
-                    <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-1.5">
-                      <Palette className="w-4 h-4 text-teal-600" />
-                      App Template
-                    </span>
-                    <span className="text-[10px] bg-teal-50 dark:bg-slate-800 text-teal-700 dark:text-teal-400 font-mono font-bold px-2 py-0.5 rounded-lg capitalize">
-                      {designTemplate}
-                    </span>
-                  </div>
-                  <div className="space-y-1.5">
-                    {[
-                      { id: 'sapphire', label: 'Clinical Sapphire', desc: 'Trustworthy & expert blue', color: 'bg-blue-500' },
-                      { id: 'emerald', label: 'Emerald Mint', desc: 'Sleek, modern laboratory green', color: 'bg-emerald-500' },
-                      { id: 'amethyst', label: 'Biotech Amethyst', desc: 'Innovative clinical purple', color: 'bg-purple-500' },
-                      { id: 'crimson', label: 'Crimson Cardiology', desc: 'High-visibility medical red', color: 'bg-rose-500' }
-                    ].map((tpl) => (
-                      <button
-                        key={tpl.id}
-                        onClick={() => {
-                          if (onChangeDesignTemplate) onChangeDesignTemplate(tpl.id);
-                          setShowTemplateDropdown(false);
-                        }}
-                        className={`w-full flex items-start gap-3 p-2 rounded-xl text-left transition-all cursor-pointer ${
-                          designTemplate === tpl.id
-                            ? 'bg-teal-500/10 text-teal-700 dark:text-teal-400 font-semibold'
-                            : 'hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300'
-                        }`}
-                      >
-                        <span className={`w-2 h-2 rounded-full ${tpl.color} mt-1.5 shrink-0`} />
-                        <div>
-                          <p className="text-xs font-bold leading-tight">{tpl.label}</p>
-                          <p className="text-[9px] text-slate-400 font-medium leading-none mt-1">{tpl.desc}</p>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
 
             {/* Notifications Bell */}
             <div className="relative">
