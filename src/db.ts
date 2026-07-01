@@ -396,9 +396,7 @@ export const dbLocal = {
     if (!localStorage.getItem(STORAGE_KEYS.WHATSAPP_CLICK_LOGS)) this.set(STORAGE_KEYS.WHATSAPP_CLICK_LOGS, []);
     
     // Do not auto-login by default to allow showing login screen on startup
-    if (!localStorage.getItem(STORAGE_KEYS.CURRENT_USER)) {
-      this.set(STORAGE_KEYS.CURRENT_USER, null);
-    }
+    this.set(STORAGE_KEYS.CURRENT_USER, null);
 
     // Background Firebase seeding & listening initialization
     try {

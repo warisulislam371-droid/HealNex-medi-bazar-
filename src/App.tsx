@@ -61,11 +61,8 @@ export default function App() {
     // Initialize Local Database Mock with default credentials & categories
     dbLocal.init();
 
-    // Load active session if any
-    const savedSession = dbLocal.getCurrentUser();
-    if (savedSession) {
-      setCurrentUser(savedSession);
-    }
+    // Do not load any active session automatically on startup to start logged out
+    setCurrentUser(null);
   }, []);
 
   const handleLogout = () => {
